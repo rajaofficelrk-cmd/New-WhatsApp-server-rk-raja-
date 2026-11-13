@@ -11,9 +11,16 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 
+// Render par uploads folder auto create hoga
+const uploadsDir = path.join(__dirname, 'uploads');
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
 const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
 const AUTH_BASE = 'auth_info_baileys';
+const OWNER_NAME = 'RK RAJA';
 
 const MIN_DELAY_SECONDS = 3;
 const DEFAULT_DELAY_SECONDS = 10;
@@ -376,7 +383,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>🎀 RK RAJA XWD — Cute Control Center 💖</title>
+<title>🎀 ${OWNER_NAME} — Cute Control Center 💖</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -637,7 +644,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
 <div class="container">
   <div class="brand">
-    <h1>🎀 RK RAJA XWD 💖</h1>
+    <h1>🎀 ${OWNER_NAME} 💖</h1>
     <p>✨ WhatsApp Cute Control Center ✨</p>
   </div>
 
@@ -647,12 +654,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="panel active" id="panel-dashboard">
+    <div class="card" id="pairCard">
+      <h2><span class="dot"></span>🔐 Naya WhatsApp Login Karein</h2>
+      <div class="field">
+        <label>Phone Number (Country code ke sath, bina + ke)</label>
+        <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
+      </div>
+      <button id="pairBtn" onclick="startPair()">🔗 Get Pairing Code</button>
+      <div id="pairMsg" class="msg"></div>
+    </div>
+
     <div class="card">
-      <h2><span class="dot"></span>🔐 Your WhatsApp Sessions</h2>
+      <h2><span class="dot"></span>💫 Aapke Saare Sessions</h2>
       <div id="sessionsList">
         <div class="empty">Loading sessions...</div>
       </div>
-      <button class="ghost" onclick="addSession()">✨ Add New Session 💕</button>
     </div>
 
     <div class="card">
@@ -723,7 +739,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
           <div class="field">
             <label>Hater Name (prefix)</label>
-            <input id="haterInput" type="text" value="RK RAJA" placeholder="RK RAJA"/>
+            <input id="haterInput" type="text" value="${OWNER_NAME}" placeholder="${OWNER_NAME}"/>
           </div>
           <div class="field">
             <label>Delay (seconds) — min 3s</label>
@@ -780,7 +796,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">💖 9MAN X YAMDHUD © — Made with love 🎀</div>
+  <div class="footer">💖 ${OWNER_NAME} © — Made with love 🎀</div>
 </div>
 
 <script>
@@ -822,7 +838,7 @@ async function loadSessions(){
 function renderSessions(){
   var list=document.getElementById('sessionsList');
   if(!currentSessions.length){
-    list.innerHTML='<div class="empty">No sessions yet 🌸 Click "Add New Session"</div>';
+    list.innerHTML='<div class="empty">No sessions yet 🌸 Upar number dalein</div>';
     return;
   }
   list.innerHTML=currentSessions.map(renderSessionCard).join('');
@@ -856,9 +872,8 @@ function renderSessionCard(s){
   }else if(s.connecting){
     body='<div class="connecting-msg">⏳ Generating pairing code... 💫</div>';
   }else{
-    body='<input class="phone-input" id="phone_'+s.id+'" type="tel" placeholder="Phone e.g. 919876543210"/>'+
+    body='<div class="connecting-msg">Session ready. Logout to reset.</div>'+
       '<div class="btn-row">'+
-      '<button onclick="pairSession(\''+s.id+'\')">🔗 Pair</button>'+
       '<button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Delete</button>'+
       '</div>';
   }
@@ -876,40 +891,39 @@ function renderSessionCard(s){
     '</div>';
 }
 
-async function addSession(){
-  var suggested='session_'+(currentSessions.length+1);
-  var name=prompt('🌸 Enter session name (letters/numbers/underscore):', suggested);
-  if(!name) return;
-  name=name.trim();
-  if(!/^[a-zA-Z0-9_]+$/.test(name)){alert('❌ Invalid name. Use only letters, numbers, and _');return;}
-  try{
-    var res=await fetch('/api/sessions/create',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({id:name})
-    });
-    var d=await res.json();
-    if(!d.success){alert('❌ '+d.error);return;}
-    lastSessionsJson='';
-    await loadSessions();
-    log('ok','Created session: '+name);
-  }catch(e){alert('❌ '+e.message);}
-}
-
-async function pairSession(id){
-  var el=document.getElementById('phone_'+id);
-  var phone=el?el.value.trim():'';
-  if(!phone||!/^\\d{10,15}$/.test(phone)){alert('❌ Enter valid phone (10-15 digits, no +/spaces)');return;}
-  try{
-    var res=await fetch('/api/sessions/'+encodeURIComponent(id)+'/pair',{
-      method:'POST',headers:{'Content-Type':'application/json'},
+async function startPair(){
+  var phone = document.getElementById('phoneInput').value.trim();
+  var btn = document.getElementById('pairBtn');
+  var msgEl = document.getElementById('pairMsg');
+  
+  if(!phone || !/^\\d{10,15}$/.test(phone)) {
+    showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath, bina + ke)');
+    return;
+  }
+  
+  btn.disabled = true; 
+  btn.textContent = 'Starting...';
+  showMsg(msgEl, '', '');
+  
+  try {
+    var res = await fetch('/api/pair-new', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
       body:JSON.stringify({phone:phone})
     });
-    var d=await res.json();
-    if(!d.success){alert('❌ '+d.error);return;}
-    log('info','Pairing session '+id+'...');
-    lastSessionsJson='';
+    var d = await res.json();
+    if(!d.success) throw new Error(d.error||'Failed');
+    
+    showMsg(msgEl, 'ok', 'Code generate ho raha hai, niche check karein...');
+    document.getElementById('phoneInput').value = '';
+    lastSessionsJson = ''; // force refresh
     await loadSessions();
-  }catch(e){alert('❌ '+e.message);}
+  } catch(e) {
+    showMsg(msgEl, 'err', '❌ ' + e.message);
+  } finally {
+    btn.disabled = false; 
+    btn.textContent = '🔗 Get Pairing Code';
+  }
 }
 
 async function logoutSession(id){
@@ -1203,9 +1217,32 @@ app.use(express.json());
 
 app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
-const upload = multer({ dest: 'uploads/' });
+const upload = multer({ dest: uploadsDir });
 
-// -------- Session create --------
+// -------- Direct Pairing --------
+app.post('/api/pair-new', async (req, res) => {
+  try {
+    const { phone } = req.body;
+    if (!phone || !/^\d{10,15}$/.test(phone)) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number. Country code ke sath dalein (bina + ke).' });
+    }
+    
+    // Auto generate a unique session ID
+    const id = 'session_' + phone.slice(-4) + '_' + Date.now().toString().slice(-4);
+    ensureSession(id);
+    
+    // Start connecting
+    connectSession(id, phone).catch((e) => {
+      console.error('Connect failed:', e.message);
+    });
+
+    res.json({ success: true, message: 'Pairing initiated', id });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// -------- Session create (fallback for old UI) --------
 app.post('/api/sessions/create', (req, res) => {
   const { id } = req.body;
   if (!id || !/^[a-zA-Z0-9_]+$/.test(id)) {
@@ -1230,7 +1267,7 @@ app.get('/api/sessions', (req, res) => {
   res.json({ success: true, sessions: list });
 });
 
-// -------- Pair session --------
+// -------- Pair session (for manual) --------
 app.post('/api/sessions/:id/pair', async (req, res) => {
   const id = req.params.id;
   const { phone } = req.body;
