@@ -661,6 +661,22 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
       </div>
       <button id="pairBtn" onclick="startPair()">🔗 Get Pairing Code</button>
+      
+      <!-- CODE YAHAN NICHE DIKHEGA -->
+      <div id="codeDisplayArea" class="hidden" style="margin-top: 18px;">
+        <div class="pair-code-box">
+          <div class="code-label">✨ Aapka Pairing Code ✨</div>
+          <div class="code-value" id="displayCode">------</div>
+        </div>
+        <div class="steps-cute" style="margin-top: 12px;">
+          <b>Steps:</b><br>
+          1. WhatsApp kholiye 📱<br>
+          2. <b>Linked Devices</b> par jayein<br>
+          3. <b>Link a Device</b> → <b>Link with phone number</b><br>
+          4. Upar wala code enter karein 💕
+        </div>
+      </div>
+      
       <div id="pairMsg" class="msg"></div>
     </div>
 
@@ -895,15 +911,19 @@ async function startPair(){
   var phone = document.getElementById('phoneInput').value.trim();
   var btn = document.getElementById('pairBtn');
   var msgEl = document.getElementById('pairMsg');
-  
+  var codeArea = document.getElementById('codeDisplayArea');
+  var codeVal = document.getElementById('displayCode');
+
   if(!phone || !/^\\d{10,15}$/.test(phone)) {
-    showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath, bina + ke)');
+    showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath, jaise 91...)');
     return;
   }
   
   btn.disabled = true; 
-  btn.textContent = 'Starting...';
+  btn.textContent = 'Generating Code...';
   showMsg(msgEl, '', '');
+  codeArea.classList.add('hidden');
+  codeVal.textContent = '------';
   
   try {
     var res = await fetch('/api/pair-new', {
@@ -914,14 +934,45 @@ async function startPair(){
     var d = await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
     
-    showMsg(msgEl, 'ok', 'Code generate ho raha hai, niche check karein...');
-    document.getElementById('phoneInput').value = '';
-    lastSessionsJson = ''; // force refresh
-    await loadSessions();
+    showMsg(msgEl, 'ok', 'Code generate ho raha hai, kripya pratiksha karein...');
+    codeArea.classList.remove('hidden');
+    codeVal.textContent = 'WAIT...';
+
+    // Poll for the code specifically for this new session
+    let attempts = 0;
+    let interval = setInterval(async () => {
+      attempts++;
+      if(attempts > 30) { // 30 seconds timeout
+        clearInterval(interval);
+        codeVal.textContent = 'TIMEOUT';
+        showMsg(msgEl, 'err', 'Code generate nahi hua. Network ya number check karein.');
+        btn.disabled = false;
+        btn.textContent = '🔗 Get Pairing Code';
+        return;
+      }
+      
+      var sRes = await fetch('/api/sessions');
+      var sData = await sRes.json();
+      var mySession = sData.sessions.find(s => s.id === d.id);
+      
+      if (mySession && mySession.code) {
+        clearInterval(interval);
+        codeVal.textContent = mySession.code;
+        showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
+        btn.disabled = false;
+        btn.textContent = '🔗 Get Pairing Code';
+      } else if (mySession && mySession.paired) {
+        clearInterval(interval);
+        codeArea.classList.add('hidden');
+        showMsg(msgEl, 'ok', 'Successfully Linked! 🎉');
+        btn.disabled = false;
+        btn.textContent = '🔗 Get Pairing Code';
+      }
+    }, 1000);
+
   } catch(e) {
     showMsg(msgEl, 'err', '❌ ' + e.message);
-  } finally {
-    btn.disabled = false; 
+    btn.disabled = false;
     btn.textContent = '🔗 Get Pairing Code';
   }
 }
@@ -1229,11 +1280,12 @@ app.post('/api/pair-new', async (req, res) => {
     
     // Auto generate a unique session ID
     const id = 'session_' + phone.slice(-4) + '_' + Date.now().toString().slice(-4);
-    ensureSession(id);
+    const s = ensureSession(id);
     
     // Start connecting
     connectSession(id, phone).catch((e) => {
       console.error('Connect failed:', e.message);
+      s.lastError = e.message;
     });
 
     res.json({ success: true, message: 'Pairing initiated', id });
