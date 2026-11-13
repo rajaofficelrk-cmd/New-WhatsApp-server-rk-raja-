@@ -13,7 +13,11 @@ const multer = require('multer');
 
 const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
-const AUTH_BASE = 'auth_info_baileys';
+const SESSIONS_BASE_DIR = 'sessions_data';
+
+if (!fs.existsSync(SESSIONS_BASE_DIR)) {
+  fs.mkdirSync(SESSIONS_BASE_DIR, { recursive: true });
+}
 
 const MIN_DELAY_SECONDS = 3;
 const DEFAULT_DELAY_SECONDS = 10;
@@ -21,49 +25,9 @@ const SEND_RETRY = 1;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 30000;
 
-// MULTIPLE SESSIONS SUPPORT
-const sessions = new Map();
-const bulkStates = new Map();
-
-function getAuthDir(clientId, phone) {
-  const safe = clientId.replace(/[^a-zA-Z0-9]/g, '').slice(0, 10);
-  return `${AUTH_BASE}_${safe}_${phone.slice(-4)}`;
-}
-
-function newSessionState(id, clientId, phone) {
-  return {
-    id, clientId, sock: null, pairingCode: null, isPaired: false, phone,
-    isConnecting: false, pairingRequested: false, lastError: null, 
-    connectedAt: null, groupsCache: {}, authDir: getAuthDir(clientId, phone)
-  };
-}
-
-function ensureSession(id, clientId, phone) {
-  if (!sessions.has(id)) sessions.set(id, newSessionState(id, clientId, phone));
-  return sessions.get(id);
-}
-
-function getBulkState(clientId) {
-  if (!bulkStates.has(clientId)) {
-    bulkStates.set(clientId, {
-      running: false, stopFlag: false, sessionId: null, sent: 0, failed: 0,
-      tasks: 0, total: 0, remaining: 0, cycle: 0, msgIndex: 0, targetIndex: 0,
-      totalTargets: 0, currentMessage: '', currentTarget: '', targets: [],
-      messages: [], delayMs: DEFAULT_DELAY_SECONDS * 1000, logs: [], logId: 0,
-      startedAt: null, workerAlive: false, lastBeat: 0,
-    });
-  }
-  return bulkStates.get(clientId);
-}
-
+// Active sessions registry mapping sessionName -> SessionContext
+const sessions = {};
 let serverStartTime = Date.now();
-
-function pushLog(bState, type, msg) {
-  bState.logs.push({ id: ++bState.logId, ts: Date.now(), type, msg });
-  if (bState.logs.length > 500) bState.logs.splice(0, bState.logs.length - 500);
-  const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
-  console.log(`${icons[type] || '•'} ${msg}`);
-}
 
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
@@ -73,290 +37,352 @@ function formatUptime(ms) {
   return `${h}:${m}:${sec}`;
 }
 
-function getGroupsFromStore(s) {
-  const out = [];
-  try {
-    if (s && s.sock && s.sock.store && s.sock.store.groupMetadata) {
-      const map = s.sock.store.groupMetadata;
-      map.forEach((v) => {
-        out.push({
-          id: v.id,
-          name: v.subject || '',
-          size: v.participants ? v.participants.length : 0,
+class WhatsAppSession {
+  constructor(name) {
+    this.name = name;
+    this.authDir = path.join(SESSIONS_BASE_DIR, name);
+    this.sock = null;
+    this.pairingCode = null;
+    this.isPaired = false;
+    this.currentPhone = null;
+    this.pairingRequested = false;
+    this.isConnecting = false;
+    this.lastError = null;
+    this.connectedAt = null;
+    this.groupsCache = {};
+
+    this.bulkState = {
+      running: false,
+      stopFlag: false,
+      sent: 0,
+      failed: 0,
+      tasks: 0,
+      total: 0,
+      remaining: 0,
+      cycle: 0,
+      msgIndex: 0,
+      targetIndex: 0,
+      totalTargets: 0,
+      currentMessage: '',
+      currentTarget: '',
+      targets: [],
+      messages: [],
+      delayMs: DEFAULT_DELAY_SECONDS * 1000,
+      logs: [],
+      logId: 0,
+      startedAt: null,
+      workerAlive: false,
+      lastBeat: 0,
+    };
+  }
+
+  pushLog(type, msg) {
+    this.bulkState.logs.push({ id: ++this.bulkState.logId, ts: Date.now(), type, msg });
+    if (this.bulkState.logs.length > 500) this.bulkState.logs.splice(0, this.bulkState.logs.length - 500);
+    const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
+    console.log(`[${this.name}] ${icons[type] || '•'} ${msg}`);
+  }
+
+  isSocketReady() {
+    return !!(this.sock && this.isPaired);
+  }
+
+  getGroupsFromStore() {
+    const out = [];
+    try {
+      if (this.sock && this.sock.store && this.sock.store.groupMetadata) {
+        const map = this.sock.store.groupMetadata;
+        map.forEach((v) => {
+          out.push({
+            id: v.id,
+            name: v.subject || '',
+            size: v.participants ? v.participants.length : 0,
+          });
+        });
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  async safeSend(jid, text) {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
+      try {
+        if (!this.isSocketReady()) throw new Error('socket not ready');
+        await this.sock.sendMessage(jid, { text });
+        return { ok: true };
+      } catch (e) {
+        lastErr = e;
+        if (attempt < SEND_RETRY) {
+          this.pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
+          await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
+        }
+      }
+    }
+    return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
+  }
+
+  async runWorker() {
+    if (this.bulkState.workerAlive) return;
+    this.bulkState.workerAlive = true;
+    this.pushLog('info', 'Worker started — loop active');
+
+    try {
+      while (!this.bulkState.stopFlag) {
+        if (!this.isSocketReady()) {
+          this.bulkState.lastBeat = Date.now();
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+
+        for (let mi = 0; mi < this.bulkState.messages.length && !this.bulkState.stopFlag; mi++) {
+          const msg = this.bulkState.messages[mi];
+          this.bulkState.msgIndex = mi;
+          this.bulkState.currentMessage = msg;
+
+          for (let ti = 0; ti < this.bulkState.targets.length && !this.bulkState.stopFlag; ti++) {
+            const t = this.bulkState.targets[ti];
+            this.bulkState.targetIndex = ti;
+            this.bulkState.currentTarget = t.label;
+            this.bulkState.lastBeat = Date.now();
+
+            if (!this.isSocketReady()) {
+              this.pushLog('warn', 'Socket temporarily unavailable — waiting to resume');
+              break;
+            }
+
+            try {
+              const res = await this.safeSend(t.jid, msg);
+              if (res.ok) {
+                this.bulkState.sent++;
+                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → ${t.label}`);
+              } else {
+                this.bulkState.failed++;
+                this.pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
+              }
+            } catch (e) {
+              this.bulkState.failed++;
+              this.pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
+            }
+
+            this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
+
+            if (!this.bulkState.stopFlag) {
+              await new Promise((r) => setTimeout(r, this.bulkState.delayMs));
+            }
+          }
+
+          if (!this.isSocketReady() && !this.bulkState.stopFlag) break;
+        }
+
+        if (!this.bulkState.stopFlag) {
+          this.bulkState.cycle++;
+          this.bulkState.remaining = this.bulkState.messages.length;
+          this.bulkState.msgIndex = 0;
+          this.bulkState.targetIndex = 0;
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed — restarting from Message 1`);
+        }
+      }
+    } catch (loopErr) {
+      this.pushLog('err', 'Worker crashed: ' + loopErr.message);
+      if (!this.bulkState.stopFlag) {
+        this.pushLog('warn', 'Worker auto-restarting in 3s...');
+        this.bulkState.workerAlive = false;
+        this.bulkState.running = true;
+        setTimeout(() => { this.runWorker(); }, 3000);
+        return;
+      }
+    } finally {
+      if (this.bulkState.stopFlag) {
+        this.bulkState.running = false;
+        this.bulkState.stopFlag = false;
+        this.bulkState.workerAlive = false;
+        this.bulkState.currentMessage = '';
+        this.bulkState.currentTarget = '';
+        this.pushLog('info', `Task stopped — Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}, Cycles: ${this.bulkState.cycle}`);
+      } else {
+        this.bulkState.workerAlive = false;
+      }
+    }
+  }
+
+  async connect(phone) {
+    if (!phone) throw new Error('Phone number required');
+    if (this.isConnecting) throw new Error('Connection already in progress');
+    if (this.isPaired) throw new Error('Already paired');
+
+    this.isConnecting = true;
+    this.currentPhone = phone;
+    this.pairingCode = null;
+    this.lastError = null;
+
+    try {
+      const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+      const { version } = await fetchLatestBaileysVersion();
+
+      this.sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }),
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        mobile: false,
+        syncFullHistory: false,
+      });
+
+      this.sock.ev.on('creds.update', saveCreds);
+
+      this.sock.ev.on('groups.upsert', (groups) => {
+        groups.forEach((g) => {
+          this.groupsCache[g.id] = {
+            id: g.id,
+            name: g.subject || '',
+            size: g.participants ? g.participants.length : 0,
+          };
         });
       });
-    }
-  } catch (_) {}
-  return out;
-}
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function isSocketReady(clientId) {
-  const bState = getBulkState(clientId);
-  const s = sessions.get(bState.sessionId);
-  return !!(s && s.sock && s.isPaired && s.clientId === clientId);
-}
-
-function parseMessagesFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
-  const seen = new Set();
-  const out = [];
-  content.split(/\r?\n/).forEach((line) => {
-    const t = line.trim();
-    if (!t) return;
-    if (seen.has(t)) return;
-    seen.add(t);
-    out.push(t);
-  });
-  return out;
-}
-
-async function safeSend(clientId, jid, text) {
-  const bState = getBulkState(clientId);
-  const s = sessions.get(bState.sessionId);
-  if (!s || !s.sock) throw new Error('session not ready');
-  
-  let lastErr = null;
-  for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
-    try {
-      if (!isSocketReady(clientId)) throw new Error('socket not ready');
-      await s.sock.sendMessage(jid, { text });
-      return { ok: true };
-    } catch (e) {
-      lastErr = e;
-      if (attempt < SEND_RETRY) {
-        pushLog(bState, 'warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
-        await sleep(RETRY_WAIT_MS);
-      }
-    }
-  }
-  return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
-}
-
-async function runWorker(clientId) {
-  const bState = getBulkState(clientId);
-  if (bState.workerAlive) return;
-  bState.workerAlive = true;
-  pushLog(bState, 'info', 'Worker started — 24/7 loop active');
-
-  try {
-    while (!bState.stopFlag) {
-      if (!isSocketReady(clientId)) {
-        bState.lastBeat = Date.now();
-        await sleep(3000);
-        continue;
-      }
-
-      for (let mi = 0; mi < bState.messages.length && !bState.stopFlag; mi++) {
-        const msg = bState.messages[mi];
-        bState.msgIndex = mi;
-        bState.currentMessage = msg;
-
-        for (let ti = 0; ti < bState.targets.length && !bState.stopFlag; ti++) {
-          const t = bState.targets[ti];
-          bState.targetIndex = ti;
-          bState.currentTarget = t.label;
-          bState.lastBeat = Date.now();
-
-          if (!isSocketReady(clientId)) {
-            pushLog(bState, 'warn', 'Socket temporarily unavailable — waiting to resume');
-            break;
+      this.sock.ev.on('groups.update', (updates) => {
+        updates.forEach((u) => {
+          if (this.groupsCache[u.id]) {
+            if (u.subject) this.groupsCache[u.id].name = u.subject;
+          } else if (u.id) {
+            this.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
           }
+        });
+      });
 
+      this.sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
+          this.pairingRequested = true;
           try {
-            const res = await safeSend(clientId, t.jid, msg);
-            if (res.ok) {
-              bState.sent++;
-              pushLog(bState, 'ok', `Cycle ${bState.cycle + 1} | Msg ${mi + 1}/${bState.messages.length} → ${t.label}`);
-            } else {
-              bState.failed++;
-              pushLog(bState, 'err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
-            }
-          } catch (e) {
-            bState.failed++;
-            pushLog(bState, 'err', `Unexpected send error → ${t.label}: ${e.message}`);
-          }
-
-          bState.remaining = bState.messages.length - (mi + 1);
-
-          if (!bState.stopFlag) {
-            await sleep(bState.delayMs);
+            await new Promise((r) => setTimeout(r, 1000));
+            this.pairingCode = await this.sock.requestPairingCode(phone);
+            this.pushLog('info', `Pairing code for ${phone}: ${this.pairingCode}`);
+            this.lastError = null;
+          } catch (err) {
+            this.pushLog('err', 'Pairing code error: ' + err.message);
+            this.lastError = err.message;
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.isConnecting = false;
           }
         }
 
-        if (!isSocketReady(clientId) && !bState.stopFlag) break;
-      }
+        if (connection === 'open') {
+          this.isPaired = true;
+          this.pairingCode = null;
+          this.pairingRequested = false;
+          this.isConnecting = false;
+          this.connectedAt = new Date().toISOString();
+          this.lastError = null;
+          this.pushLog('ok', `WhatsApp connected (${phone})`);
 
-      if (!bState.stopFlag) {
-        bState.cycle++;
-        bState.remaining = bState.messages.length;
-        bState.msgIndex = 0;
-        bState.targetIndex = 0;
-        pushLog(bState, 'info', `Cycle ${bState.cycle} completed — restarting from Message 1`);
-      }
+          setTimeout(() => {
+            try {
+              const groups = this.getGroupsFromStore();
+              groups.forEach((g) => { this.groupsCache[g.id] = g; });
+              this.pushLog('info', `Loaded ${groups.length} groups into cache`);
+            } catch (e) {}
+          }, 3000);
+
+          if (this.bulkState.running && !this.bulkState.workerAlive) {
+            this.pushLog('info', 'Reconnect detected — resuming bulk worker');
+            this.runWorker();
+          }
+        }
+
+        if (connection === 'close') {
+          const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          this.pushLog('warn', `Connection closed (code ${statusCode})`);
+
+          this.isPaired = false;
+          this.isConnecting = false;
+
+          if (shouldReconnect && this.currentPhone) {
+            this.pairingRequested = false;
+            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
+          } else if (statusCode === DisconnectReason.loggedOut) {
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.currentPhone = null;
+            if (this.bulkState.running) {
+              this.bulkState.stopFlag = true;
+              this.pushLog('warn', 'Logged out — stopping bulk worker');
+            }
+          }
+        }
+      });
+    } catch (err) {
+      this.isConnecting = false;
+      this.lastError = err.message;
+      throw err;
     }
-  } catch (loopErr) {
-    pushLog(bState, 'err', 'Worker crashed: ' + loopErr.message);
-    if (!bState.stopFlag) {
-      pushLog(bState, 'warn', 'Worker auto-restarting in 3s...');
-      bState.workerAlive = false;
-      bState.running = true;
-      setTimeout(() => { runWorker(clientId); }, 3000);
-      return;
+  }
+
+  async logout() {
+    if (this.bulkState.running) {
+      this.bulkState.stopFlag = true;
+      this.pushLog('warn', 'Logout — stopping worker');
     }
-  } finally {
-    if (bState.stopFlag) {
-      bState.running = false;
-      bState.stopFlag = false;
-      bState.workerAlive = false;
-      bState.currentMessage = '';
-      bState.currentTarget = '';
-      pushLog(bState, 'info', `Task stopped — Sent: ${bState.sent}, Failed: ${bState.failed}, Cycles: ${bState.cycle}`);
-    } else {
-      bState.workerAlive = false;
-    }
+    if (this.sock) { try { await this.sock.logout(); } catch (_) {} }
+    if (fs.existsSync(this.authDir)) fs.rmSync(this.authDir, { recursive: true, force: true });
+    this.isPaired = false;
+    this.pairingCode = null;
+    this.currentPhone = null;
+    this.pairingRequested = false;
+    this.isConnecting = false;
+    this.connectedAt = null;
+    this.lastError = null;
+    this.sock = null;
+    this.groupsCache = {};
+    this.pushLog('warn', 'Logged out, auth cleared');
   }
 }
 
+// Watchdog interval for all sessions
 setInterval(() => {
-  for (const [clientId, bState] of bulkStates.entries()) {
-    if (bState.running && !bState.workerAlive) {
-      pushLog(bState, 'warn', 'Watchdog: worker not alive — restarting');
-      runWorker(clientId);
+  Object.values(sessions).forEach((sess) => {
+    if (sess.bulkState.running && !sess.bulkState.workerAlive) {
+      sess.pushLog('warn', 'Watchdog: worker not alive — restarting');
+      sess.runWorker();
     }
-  }
+  });
 }, WATCHDOG_INTERVAL_MS);
 
-async function connectSession(id, phone, clientId) {
-  const s = ensureSession(id, clientId, phone);
-  if (s.isPaired) throw new Error('Already paired');
-  if (s.isConnecting) throw new Error('Connection already in progress');
-
-  s.isConnecting = true;
-  s.phone = phone;
-  s.pairingCode = null;
-  s.pairingRequested = false;
-  s.lastError = null;
-
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(s.authDir);
-    const { version } = await fetchLatestBaileysVersion();
-
-    s.sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
-      logger: pino({ level: 'silent' }),
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
-      mobile: false,
-      syncFullHistory: false,
-    });
-
-    s.sock.ev.on('creds.update', saveCreds);
-
-    s.sock.ev.on('groups.upsert', (groups) => {
-      groups.forEach((g) => {
-        s.groupsCache[g.id] = { id: g.id, name: g.subject || '', size: g.participants ? g.participants.length : 0 };
-      });
-    });
-
-    s.sock.ev.on('groups.update', (updates) => {
-      updates.forEach((u) => {
-        if (s.groupsCache[u.id]) {
-          if (u.subject) s.groupsCache[u.id].name = u.subject;
-        } else if (u.id) {
-          s.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
-        }
-      });
-    });
-
-    s.sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect } = update;
-      const bState = getBulkState(clientId);
-
-      if (connection === 'connecting' && !s.sock.authState.creds.registered && !s.pairingRequested) {
-        s.pairingRequested = true;
-        try {
-          await sleep(1000);
-          s.pairingCode = await s.sock.requestPairingCode(phone);
-          console.log(`\n📱 PAIRING CODE for ${phone}: ${s.pairingCode}\n`);
-          pushLog(bState, 'info', `Pairing code for ${phone}: ${s.pairingCode}`);
-          s.lastError = null;
-        } catch (err) {
-          console.error('❌ Pairing code error:', err.message);
-          s.lastError = err.message;
-          s.pairingCode = null;
-          s.pairingRequested = false;
-          s.isConnecting = false;
-        }
-      }
-
-      if (connection === 'open') {
-        console.log('✅ WhatsApp connected!');
-        s.isPaired = true;
-        s.pairingCode = null;
-        s.pairingRequested = false;
-        s.isConnecting = false;
-        s.connectedAt = new Date().toISOString();
-        s.lastError = null;
-        pushLog(bState, 'ok', `WhatsApp connected (${phone})`);
-
-        setTimeout(() => {
-          try {
-            const groups = getGroupsFromStore(s);
-            groups.forEach((g) => { s.groupsCache[g.id] = g; });
-            pushLog(bState, 'info', `Loaded ${groups.length} groups into cache`);
-          } catch (e) {}
-        }, 3000);
-
-        if (bState.running && bState.sessionId === s.id && !bState.workerAlive) {
-          pushLog(bState, 'info', 'Reconnect detected — resuming bulk worker');
-          runWorker(clientId);
-        }
-      }
-
-      if (connection === 'close') {
-        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        pushLog(bState, 'warn', `Connection closed (code ${statusCode})`);
-
-        s.isPaired = false;
-        s.isConnecting = false;
-
-        if (bState.running && bState.sessionId === s.id) {
-          pushLog(bState, 'warn', 'Socket dropped — worker will auto-resume after reconnect');
-        }
-
-        if (shouldReconnect && s.phone) {
-          s.pairingRequested = false;
-          setTimeout(() => connectSession(s.id, s.phone, clientId).catch(console.error), 3000);
-        } else if (statusCode === DisconnectReason.loggedOut) {
-          s.pairingCode = null;
-          s.pairingRequested = false;
-          s.phone = null;
-          if (bState.running && bState.sessionId === s.id) {
-            bState.stopFlag = true;
-            pushLog(bState, 'warn', 'Logged out — stopping bulk worker');
-          }
-        }
-      }
-    });
-  } catch (err) {
-    s.isConnecting = false;
-    s.lastError = err.message;
-    throw err;
+// Helper to get or create session
+function getOrCreateSession(name) {
+  const cleanName = (name || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (!sessions[cleanName]) {
+    sessions[cleanName] = new WhatsAppSession(cleanName);
   }
+  return sessions[cleanName];
 }
 
+// Auto-discover any pre-existing session folders on startup
+if (fs.existsSync(SESSIONS_BASE_DIR)) {
+  fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
+    if (dirent.isDirectory()) {
+      getOrCreateSession(dirent.name);
+    }
+  });
+}
+if (Object.keys(sessions).length === 0) {
+  getOrCreateSession('default');
+}
+
+// ============================================================
+// EMBEDDED HTML (Multi-Session UI)
+// ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD 🎀💖 — Control Center</title>
+<title>9AMAN X YAMDHUD — Multi-Session Control Center</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
@@ -430,10 +456,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     border-radius:18px;padding:24px;margin-bottom:20px;
     backdrop-filter:blur(16px) saturate(140%);
     -webkit-backdrop-filter:blur(16px) saturate(140%);
-    box-shadow:
-      0 20px 50px rgba(0,0,0,.55),
-      inset 0 1px 0 rgba(255,255,255,.05),
-      0 0 32px rgba(255,0,60,.06);
+    box-shadow:0 20px 50px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.05),0 0 32px rgba(255,0,60,.06);
   }
   .card::before{
     content:"";position:absolute;inset:-1px;border-radius:18px;padding:1px;
@@ -577,23 +600,37 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
 <div class="container">
   <div class="brand">
-    <h1>RK RAJA <span class="x">X</span>WD 🎀💖</h1>
-    <p>WhatsApp Control Center</p>
+    <h1>9AMAN <span class="x">X</span> YAMDHUD</h1>
+    <p>Multi-Session WhatsApp Control Center</p>
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
-    <div class="tab" data-tab="sender" onclick="switchTab('sender')">Bulk Sender</div>
+    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard & Pairing</div>
+    <div class="tab" data-tab="sender" onclick="switchTab('sender')">Bulk Sender Hub</div>
   </div>
 
   <div class="panel active" id="panel-dashboard">
     <div class="card">
+      <h2><span class="dot"></span>Session Selection</h2>
+      <div class="field">
+        <label>Select or Create Session Name</label>
+        <div style="display:flex;gap:10px">
+          <select id="dashSessionSelect" onchange="onSessionChange()"></select>
+          <button class="ghost" style="width:auto;margin-top:0" onclick="createNewSessionPrompt()">+ New Session</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
       <div class="status-row">
-        <h2 style="margin:0"><span class="dot"></span>Your Sessions</h2>
+        <h2 style="margin:0"><span class="dot"></span>Connection Status</h2>
+        <span id="badge" class="badge b-idle">Idle</span>
       </div>
-      <div id="sessionsList" class="grid2" style="grid-template-columns:1fr; gap:12px;">
-        <div class="empty" style="grid-column:1/-1;">Loading sessions...</div>
+      <div class="grid2">
+        <div class="stat"><div class="k">Number</div><div class="v" id="infoPhone">—</div></div>
+        <div class="stat"><div class="k">Connected At</div><div class="v" id="infoTime">—</div></div>
       </div>
+      <div id="errBox" class="msg err hidden"></div>
     </div>
 
     <div class="card" id="pairCard">
@@ -620,14 +657,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card" id="groupsCard">
       <h2><span class="dot"></span>Your WhatsApp Groups</h2>
-      
-      <div class="field">
-        <label>Select Session</label>
-        <select id="groupsSessionSelect" onchange="onGroupsSessionChange()">
-          <option value="">-- Select Session --</option>
-        </select>
-      </div>
-
       <div class="groups-toolbar">
         <button class="ghost" id="refreshGroupsBtn" onclick="fetchGroups()">Refresh Groups</button>
         <button class="ghost" onclick="selectAllGroups()">Select All</button>
@@ -635,7 +664,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <span class="count" id="groupsCount">0 groups</span>
       </div>
       <div class="groups-list" id="groupsList">
-        <div class="empty">Select session & click "Refresh Groups"</div>
+        <div class="empty">Pair WhatsApp first, then click "Refresh Groups"</div>
       </div>
 
       <div class="field" style="margin-top:16px">
@@ -648,8 +677,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <h2><span class="dot"></span>Danger Zone</h2>
-      <p class="hint">Logout deletes auth — you'll need to pair again.</p>
-      <button class="ghost" onclick="logoutAll()">Logout All / Reset</button>
+      <p class="hint">Logout deletes session auth data for this specific session name.</p>
+      <button class="ghost" onclick="logout()">Logout / Delete Session</button>
     </div>
   </div>
 
@@ -659,12 +688,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Select Session</h2>
           <div class="field">
-            <label>Session</label>
-            <select id="sessionSelect">
-              <option value="">-- Select Session --</option>
-            </select>
+            <label>Active Sender Session</label>
+            <select id="senderSessionSelect" onchange="syncSessionDropdowns(this.value)"></select>
           </div>
-          <div class="hint" id="sessionHint">Select a paired session for bulk sending.</div>
+          <div class="hint">Choose which paired session runs this bulk queue job.</div>
         </div>
 
         <div class="card">
@@ -751,21 +778,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD © — Secure Session</div>
+  <div class="footer">9MAN X YAMDHUT © — Multi-Session WhatsApp Manager</div>
 </div>
 
 <script>
-var CLIENT_ID = localStorage.getItem('x_client_id');
-if (!CLIENT_ID) {
-  CLIENT_ID = 'user_' + Math.random().toString(36).substring(2, 15);
-  localStorage.setItem('x_client_id', CLIENT_ID);
-}
-function apiFetch(url, options) {
-  options = options || {};
-  options.headers = options.headers || {};
-  options.headers['x-client-id'] = CLIENT_ID;
-  return fetch(url, options);
-}
+let currentSession = 'default';
 
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
@@ -774,15 +791,56 @@ function switchTab(name){
 function showMsg(el,type,text){el.textContent=text;el.style.display=type?'block':'none';el.className='msg'+(type?' '+type:'');}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function clearLog(){document.getElementById('logBox').innerHTML='';}
-function log(type,msg){
-  const box=document.getElementById('logBox');
-  const t=new Date().toLocaleTimeString();
-  const el=document.createElement('div');
-  el.className='line '+type;
-  el.innerHTML='<span class="t">['+t+']</span>'+escapeHtml(msg);
-  box.appendChild(el);
-  box.scrollTop=box.scrollHeight;
-  while(box.children.length>500) box.removeChild(box.firstChild);
+
+async function loadSessions(){
+  try{
+    const res = await fetch('/api/sessions');
+    const d = await res.json();
+    if(d.sessions){
+      const opts = d.sessions.map(s => '<option value="'+s+'" '+(s===currentSession?'selected':'')+'>'+s+'</option>').join('');
+      document.getElementById('dashSessionSelect').innerHTML = opts;
+      document.getElementById('senderSessionSelect').innerHTML = opts;
+      if(!d.sessions.includes(currentSession) && d.sessions.length){
+        currentSession = d.sessions[0];
+      }
+    }
+  }catch(e){console.error(e);}
+}
+
+function onSessionChange(){
+  currentSession = document.getElementById('dashSessionSelect').value;
+  document.getElementById('senderSessionSelect').value = currentSession;
+  allGroups = [];
+  dashSelected.clear();
+  bulkSelected.clear();
+  renderDashGroups();
+  renderBulkGroups();
+  clearLog();
+  pollStatus();
+}
+
+function syncSessionDropdowns(val){
+  currentSession = val;
+  document.getElementById('dashSessionSelect').value = currentSession;
+  allGroups = [];
+  dashSelected.clear();
+  bulkSelected.clear();
+  renderDashGroups();
+  renderBulkGroups();
+  clearLog();
+  pollStatus();
+}
+
+async function createNewSessionPrompt(){
+  const name = prompt('Enter new session name (e.g. session2, bot2):');
+  if(!name) return;
+  const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  if(!clean) return;
+  currentSession = clean;
+  await loadSessions();
+  document.getElementById('dashSessionSelect').value = currentSession;
+  document.getElementById('senderSessionSelect').value = currentSession;
+  onSessionChange();
 }
 
 async function startPair(){
@@ -793,50 +851,37 @@ async function startPair(){
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
-    const res=await apiFetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+    const res=await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone, session: currentSession})});
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
     document.getElementById('codeValue').textContent='Generating...';
     document.getElementById('codeValue').classList.add('loading');
     showMsg(msgEl,'ok','Pairing started — code appears shortly');
-    pollStatus();
   }catch(e){showMsg(msgEl,'err',e.message);}
   finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
 }
 
-async function logoutAll(){
-  if(!confirm('Logout all sessions? Auth will be deleted.'))return;
-  try{await apiFetch('/api/logout-all',{method:'POST'});location.reload();}catch(e){alert(e.message);}
-}
-async function logoutSession(id){
-  if(!confirm('Logout this session?'))return;
-  try{await apiFetch('/api/sessions/'+id+'/logout',{method:'POST'});pollStatus();}catch(e){alert(e.message);}
-}
-async function deleteSession(id){
-  if(!confirm('Delete this session completely?'))return;
-  try{await apiFetch('/api/sessions/'+id,{method:'DELETE'});pollStatus();}catch(e){alert(e.message);}
+async function logout(){
+  if(!confirm('Logout session "'+currentSession+'"? Auth will be deleted.'))return;
+  try{
+    await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session: currentSession})});
+    await loadSessions();
+    onSessionChange();
+  }catch(e){alert(e.message);}
 }
 
 let allGroups=[];
 let dashSelected=new Set();
 let bulkSelected=new Set();
 
-function onGroupsSessionChange(){
-  dashSelected.clear(); allGroups=[];
-  document.getElementById('groupsList').innerHTML='<div class="empty">Click Refresh to load groups</div>';
-  document.getElementById('groupsCount').textContent='0 groups';
-}
-
 async function fetchGroups(){
-  const sessionId = document.getElementById('groupsSessionSelect').value;
-  if(!sessionId){alert('Select a session first');return;}
   const btn=document.getElementById('refreshGroupsBtn');
   const listEl=document.getElementById('groupsList');
   btn.disabled=true;btn.textContent='Fetching...';
   listEl.innerHTML='<div class="empty">Loading groups...</div>';
   try{
-    const res=await apiFetch('/api/sessions/'+sessionId+'/groups');
+    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession));
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed to fetch');
     allGroups = d.groups || [];
@@ -850,6 +895,7 @@ async function fetchGroups(){
     btn.disabled=false;btn.textContent='Refresh Groups';
   }
 }
+
 function renderDashGroups(){
   const listEl=document.getElementById('groupsList');
   document.getElementById('groupsCount').textContent=allGroups.length+' groups';
@@ -880,8 +926,6 @@ function selectAllGroups(){allGroups.forEach(g=>dashSelected.add(g.id));renderDa
 function clearGroupSelection(){dashSelected.clear();renderDashGroups();}
 
 async function sendToSelectedGroups(){
-  const sessionId = document.getElementById('groupsSessionSelect').value;
-  if(!sessionId){showMsg(document.getElementById('groupSendMsg'),'err','Select a session first');return;}
   const msg=document.getElementById('groupMsgInput').value.trim();
   const box=document.getElementById('groupSendMsg');
   const btn=document.getElementById('groupSendBtn');
@@ -889,9 +933,9 @@ async function sendToSelectedGroups(){
   if(!msg){showMsg(box,'err','Enter a message');return;}
   btn.disabled=true;btn.textContent='Sending...';showMsg(box,'','');
   try{
-    const res=await apiFetch('/api/sessions/'+sessionId+'/send-groups',{
+    const res=await fetch('/api/send-groups',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({groupIds:[...dashSelected], message:msg})
+      body:JSON.stringify({session: currentSession, groupIds:[...dashSelected], message:msg})
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
@@ -904,19 +948,7 @@ async function sendToSelectedGroups(){
 
 async function fetchGroupsForBulk(){
   if(allGroups.length){ renderBulkGroups(); return; }
-  const sessionId = document.getElementById('sessionSelect').value;
-  if(!sessionId){alert('Select a session first');return;}
-  try{
-    const res=await apiFetch('/api/sessions/'+sessionId+'/groups');
-    const d=await res.json();
-    if(!d.success) throw new Error(d.error||'Failed to fetch');
-    allGroups = d.groups || [];
-    renderBulkGroups();
-    log('info', 'Fetched '+allGroups.length+' groups');
-  }catch(e){
-    alert(e.message);
-    log('err','Fetch groups: '+e.message);
-  }
+  await fetchGroups();
 }
 function renderBulkGroups(){
   const listEl=document.getElementById('bulkGroupsList');
@@ -968,8 +1000,6 @@ document.getElementById('fileInput').addEventListener('change',async (e)=>{
 });
 
 async function startServer(){
-  const sessionId=document.getElementById('sessionSelect').value;
-  if(!sessionId){alert('Select a session first');return;}
   const file=document.getElementById('fileInput').files[0];
   const hater=document.getElementById('haterInput').value.trim();
   let delay=parseInt(document.getElementById('delayInput').value)||10;
@@ -984,16 +1014,16 @@ async function startServer(){
   startBtn.disabled=true;startBtn.textContent='Starting...';
 
   const fd=new FormData();
+  fd.append('session', currentSession);
   fd.append('file',file);
   fd.append('hater',hater);
   fd.append('delay',String(delay));
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
-  fd.append('sessionId',sessionId);
 
-  log('info','Starting bulk task...');
+  log('info','Starting bulk task for session: '+currentSession);
   try{
-    const res=await apiFetch('/api/bulk/start',{method:'POST',body:fd});
+    const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','Task started — '+d.total+' messages in queue, '+d.totalTargets+' targets');
@@ -1005,90 +1035,57 @@ async function startServer(){
     startBtn.disabled=false;startBtn.textContent='Start Server';
   }
 }
+
 async function stopTask(){
   try{
-    const res=await apiFetch('/api/bulk/stop',{method:'POST'});
+    const res=await fetch('/api/bulk/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session: currentSession})});
     const d=await res.json();
     if(d.success) log('warn','Stop requested — task will halt immediately');
     else log('err',d.error||'No task running');
   }catch(e){log('err',e.message);}
 }
 
-let currentSessions = [];
 async function pollStatus(){
   try{
-    const res=await apiFetch('/api/sessions');
+    const res=await fetch('/api/status?session='+encodeURIComponent(currentSession));
     const d=await res.json();
-    currentSessions = d.sessions || [];
+    const badge=document.getElementById('badge');
+    const infoPhone=document.getElementById('infoPhone');
+    const infoTime=document.getElementById('infoTime');
+    const errBox=document.getElementById('errBox');
+    const codeSection=document.getElementById('codeSection');
+    const codeValue=document.getElementById('codeValue');
+    const pairCard=document.getElementById('pairCard');
+    const phoneInput=document.getElementById('phoneInput');
+    const pairBtn=document.getElementById('pairBtn');
 
-    // Render Sessions List
-    const listEl=document.getElementById('sessionsList');
-    if(!currentSessions.length){
-      listEl.innerHTML = '<div class="empty" style="grid-column:1/-1;">No sessions found. Add one below.</div>';
-    } else {
-      listEl.innerHTML = currentSessions.map(s=>{
-        const badge = s.paired 
-          ? '<span class="badge b-paired" style="font-size:9px;padding:4px 10px;">Paired</span>' 
-          : (s.code ? '<span class="badge b-wait" style="font-size:9px;padding:4px 10px;">Waiting</span>' : '<span class="badge b-idle" style="font-size:9px;padding:4px 10px;">Connecting</span>');
-        
-        const logoutBtn = s.paired ? `<button class="ghost" style="width:auto; padding:6px 12px; font-size:10px; margin:0;" onclick="logoutSession('${s.id}')">Logout</button>` : '';
-        const deleteBtn = `<button class="danger" style="width:auto; padding:6px 12px; font-size:10px; margin:0;" onclick="deleteSession('${s.id}')">Delete</button>`;
-
-        return `
-          <div class="stat" style="display:flex; justify-content:space-between; align-items:center; text-align:left;">
-            <div>
-              <div class="v small" style="font-size:14px; margin-bottom:4px; text-shadow:none;">${s.phone || s.id}</div>
-              <div style="font-size:11px; color:#8b8b9c;">${s.code ? 'Code: '+s.code : (s.connectedAt ? new Date(s.connectedAt).toLocaleString() : 'Connecting...')}</div>
-            </div>
-            <div style="display:flex; flex-direction:column; gap:6px; align-items:flex-end;">
-              ${badge}
-              <div style="display:flex; gap:6px;">
-                ${logoutBtn}
-                ${deleteBtn}
-              </div>
-            </div>
-          </div>
-        `;
-      }).join('');
+    infoPhone.textContent=d.phone||'—';
+    infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
+    if(d.paired){
+      badge.textContent='Paired';badge.className='badge b-paired';
+      codeSection.classList.add('hidden');pairCard.classList.add('hidden');
+    }else if(d.code){
+      badge.textContent='Waiting for pairing';badge.className='badge b-wait';
+      codeSection.classList.remove('hidden');
+      codeValue.textContent=d.code;codeValue.classList.remove('loading');
+      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
+    }else if(d.connecting){
+      badge.textContent='Connecting';badge.className='badge b-wait';
+      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
+    }else{
+      badge.textContent='Idle';badge.className='badge b-idle';
+      phoneInput.disabled=false;pairBtn.disabled=false;
+      codeSection.classList.add('hidden');pairCard.classList.remove('hidden');
     }
-
-    // Update Dropdowns
-    const paired = currentSessions.filter(s => s.paired);
-    const opts = '<option value="">-- Select Session --</option>' + paired.map(s => `<option value="${s.id}">${s.phone}</option>`).join('');
-    
-    const sel1 = document.getElementById('sessionSelect');
-    const sel2 = document.getElementById('groupsSessionSelect');
-    const v1 = sel1.value, v2 = sel2.value;
-    if (sel1.innerHTML !== opts) { sel1.innerHTML = opts; if (paired.some(s => s.id === v1)) sel1.value = v1; }
-    if (sel2.innerHTML !== opts) { sel2.innerHTML = opts; if (paired.some(s => s.id === v2)) sel2.value = v2; }
-
-    // Pairing UI Update
-    const anyConnecting = currentSessions.find(s => s.connecting || s.code);
-    if (anyConnecting) {
-      document.getElementById('pairCard').classList.remove('hidden');
-      document.getElementById('phoneInput').disabled = true;
-      document.getElementById('pairBtn').disabled = true;
-      if (anyConnecting.code) {
-        document.getElementById('codeSection').classList.remove('hidden');
-        document.getElementById('codeValue').textContent = anyConnecting.code;
-        document.getElementById('codeValue').classList.remove('loading');
-      } else {
-        document.getElementById('codeSection').classList.remove('hidden');
-        document.getElementById('codeValue').textContent = 'Generating...';
-        document.getElementById('codeValue').classList.add('loading');
-      }
-    } else {
-      document.getElementById('phoneInput').disabled = false;
-      document.getElementById('pairBtn').disabled = false;
-      document.getElementById('codeSection').classList.add('hidden');
-    }
+    if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
+    else{errBox.classList.add('hidden');}
   }catch(e){console.error(e);}
 }
 
 let lastLogId=0;
 async function pollStats(){
   try{
-    const res=await apiFetch('/api/bulk/status');
+    const res=await fetch('/api/bulk/status?session='+encodeURIComponent(currentSession));
     const d=await res.json();
 
     const statusEl=document.getElementById('statStatus');
@@ -1125,21 +1122,27 @@ async function pollStats(){
           box.appendChild(el);
         }
       });
-      lastLogId=d.logs[d.logs.length-1].id;
+      if(d.logs.length) lastLogId=d.logs[d.logs.length-1].id;
       box.scrollTop=box.scrollHeight;
       while(box.children.length>500) box.removeChild(box.firstChild);
     }
   }catch(e){console.error(e);}
 }
 
-setInterval(pollStatus,2000);
-setInterval(pollStats,1500);
-pollStatus();
-pollStats();
+// Initialize session list on load
+loadSessions().then(()=>{
+  setInterval(pollStatus,2000);
+  setInterval(pollStats,1500);
+  pollStatus();
+  pollStats();
+});
 </script>
 </body>
 </html>`;
 
+// ============================================================
+// Express app with Multi-Session support
+// ============================================================
 const app = express();
 app.use(express.json());
 
@@ -1147,135 +1150,79 @@ app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
-function getClientId(req) {
-  return req.headers['x-client-id'] || 'default_client';
-}
-
-app.post('/api/pair', async (req, res) => {
-  try {
-    const clientId = getClientId(req);
-    const { phone } = req.body;
-    if (!phone || !/^\d{10,15}$/.test(phone)) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number' });
-    }
-    
-    // Check if this user already has this number paired
-    for (let s of sessions.values()) {
-      if (s.clientId === clientId && s.phone === phone && s.isPaired) {
-        return res.status(400).json({ success: false, error: 'Already paired!' });
-      }
-    }
-
-    const id = 'session_' + phone.slice(-4) + '_' + Date.now().toString().slice(-4);
-    ensureSession(id, clientId, phone);
-    
-    connectSession(id, phone, clientId).catch((e) => {
-      console.error('Connect failed:', e.message);
-      const s = sessions.get(id);
-      if (s) s.lastError = e.message;
-    });
-
-    res.json({ success: true, message: 'Pairing initiated', id });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
 app.get('/api/sessions', (req, res) => {
-  const clientId = getClientId(req);
-  const list = [...sessions.values()]
-    .filter(s => s.clientId === clientId)
-    .map(s => ({
-      id: s.id,
-      paired: s.isPaired,
-      connecting: s.isConnecting,
-      code: s.isPaired ? null : s.pairingCode,
-      phone: s.phone,
-      connectedAt: s.connectedAt,
-      error: s.lastError,
-    }));
+  const list = Object.keys(sessions);
+  if (!list.includes('default')) list.unshift('default');
   res.json({ success: true, sessions: list });
 });
 
-app.post('/api/logout-all', async (req, res) => {
+app.post('/api/pair', async (req, res) => {
   try {
-    const clientId = getClientId(req);
-    const bState = getBulkState(clientId);
-    if (bState.running) bState.stopFlag = true;
+    const { phone, session } = req.body;
+    const sess = getOrCreateSession(session);
 
-    for (let [id, s] of sessions.entries()) {
-      if (s.clientId === clientId) {
-        if (s.sock) { try { await s.sock.logout(); } catch (_) {} }
-        if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
-        sessions.delete(id);
-      }
+    if (!phone || !/^\d{10,15}$/.test(phone)) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
-    res.json({ success: true });
+    if (sess.isPaired) return res.status(400).json({ success: false, error: 'Already paired. Logout first.' });
+    if (sess.isConnecting) {
+      return res.status(400).json({
+        success: false,
+        error: 'Connection in progress for session ' + sess.name,
+      });
+    }
+    if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
+
+    sess.connect(phone).catch((e) => {
+      console.error('Connect failed:', e.message);
+      sess.lastError = e.message;
+    });
+
+    res.json({ success: true, message: 'Pairing initiated for session ' + sess.name });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/sessions/:id/logout', async (req, res) => {
-  try {
-    const clientId = getClientId(req);
-    const s = sessions.get(req.params.id);
-    
-    if (!s || s.clientId !== clientId) return res.status(404).json({ success: false, error: 'Session not found' });
-    
-    const bState = getBulkState(clientId);
-    if (bState.running && bState.sessionId === s.id) bState.stopFlag = true;
-    
-    if (s.sock) { try { await s.sock.logout(); } catch (_) {} }
-    if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
-    
-    sessions.delete(s.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+app.get('/api/status', (req, res) => {
+  const sessName = req.query.session || 'default';
+  const sess = getOrCreateSession(sessName);
+  res.json({
+    paired: sess.isPaired,
+    connecting: sess.isConnecting,
+    code: sess.isPaired ? null : sess.pairingCode,
+    phone: sess.currentPhone,
+    connectedAt: sess.connectedAt,
+    error: sess.lastError,
+  });
 });
 
-app.delete('/api/sessions/:id', async (req, res) => {
+app.get('/api/groups', async (req, res) => {
   try {
-    const clientId = getClientId(req);
-    const s = sessions.get(req.params.id);
-    
-    if (!s || s.clientId !== clientId) return res.status(404).json({ success: false, error: 'Session not found' });
-    
-    const bState = getBulkState(clientId);
-    if (bState.running && bState.sessionId === s.id) bState.stopFlag = true;
+    const sessName = req.query.session || 'default';
+    const sess = getOrCreateSession(sessName);
 
-    if (s.sock) { try { await s.sock.logout(); } catch (_) {} }
-    if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
-    
-    sessions.delete(s.id);
-    res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
-});
-
-app.get('/api/sessions/:id/groups', async (req, res) => {
-  try {
-    const clientId = getClientId(req);
-    const s = sessions.get(req.params.id);
-    
-    if (!s || !s.isPaired || !s.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
-    if (s.clientId !== clientId) return res.status(403).json({ success: false, error: 'Unauthorized' });
+    if (!sess.isPaired || !sess.sock) {
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sessName });
+    }
 
     const map = new Map();
-    Object.values(s.groupsCache).forEach((g) => map.set(g.id, g));
+    Object.values(sess.groupsCache).forEach((g) => map.set(g.id, g));
 
     try {
-      getGroupsFromStore(s).forEach((g) => {
+      sess.getGroupsFromStore().forEach((g) => {
         if (!map.has(g.id)) map.set(g.id, g);
+        else {
+          const existing = map.get(g.id);
+          if (!existing.name && g.name) existing.name = g.name;
+          if (!existing.size && g.size) existing.size = g.size;
+        }
       });
     } catch (_) {}
 
-    if (map.size === 0 && typeof s.sock.groupFetchAllParticipating === 'function') {
+    if (map.size === 0 && typeof sess.sock.groupFetchAllParticipating === 'function') {
       try {
-        const all = await s.sock.groupFetchAllParticipating();
+        const all = await sess.sock.groupFetchAllParticipating();
         Object.values(all).forEach((g) => {
           map.set(g.id, {
             id: g.id,
@@ -1290,7 +1237,7 @@ app.get('/api/sessions/:id/groups', async (req, res) => {
       .filter((g) => g.id && g.id.endsWith('@g.us'))
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-    groups.forEach((g) => { s.groupsCache[g.id] = g; });
+    groups.forEach((g) => { sess.groupsCache[g.id] = g; });
 
     res.json({ success: true, groups });
   } catch (err) {
@@ -1298,29 +1245,30 @@ app.get('/api/sessions/:id/groups', async (req, res) => {
   }
 });
 
-app.post('/api/sessions/:id/send-groups', async (req, res) => {
+app.post('/api/send-groups', async (req, res) => {
   try {
-    const clientId = getClientId(req);
-    const s = sessions.get(req.params.id);
-    
-    if (!s || !s.isPaired || !s.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
-    if (s.clientId !== clientId) return res.status(403).json({ success: false, error: 'Unauthorized' });
+    const { session, groupIds, message } = req.body;
+    const sess = getOrCreateSession(session);
 
-    const { groupIds, message } = req.body;
-    if (!Array.isArray(groupIds) || !groupIds.length) return res.status(400).json({ success: false, error: 'No groups selected' });
-    if (!message || !message.trim()) return res.status(400).json({ success: false, error: 'Message is required' });
+    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sess.name });
+    if (!Array.isArray(groupIds) || !groupIds.length) {
+      return res.status(400).json({ success: false, error: 'No groups selected' });
+    }
+    if (!message || !message.trim()) {
+      return res.status(400).json({ success: false, error: 'Message is required' });
+    }
 
     let sent = 0, failed = 0;
     const errors = [];
     for (const jid of groupIds) {
       try {
-        await s.sock.sendMessage(jid, { text: message });
+        await sess.sock.sendMessage(jid, { text: message });
         sent++;
       } catch (e) {
         failed++;
         errors.push(jid + ': ' + e.message);
       }
-      await sleep(800);
+      await new Promise((r) => setTimeout(r, 800));
     }
     res.json({ success: true, sent, failed, total: groupIds.length, errors });
   } catch (err) {
@@ -1328,83 +1276,146 @@ app.post('/api/sessions/:id/send-groups', async (req, res) => {
   }
 });
 
+app.post('/api/logout', async (req, res) => {
+  try {
+    const { session } = req.body;
+    const sessName = session || 'default';
+    const sess = sessions[sessName];
+    if (sess) {
+      await sess.logout();
+      delete sessions[sessName];
+    }
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ============================================================
+// BULK START PER SESSION
+// ============================================================
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
-    const clientId = getClientId(req);
-    const { hater, delay, lastHater, groupIds, sessionId } = req.body;
-    
-    const s = sessions.get(sessionId);
-    if (!s || !s.isPaired || !s.sock) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired yet.' });
-    }
-    if (s.clientId !== clientId) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(403).json({ success: false, error: 'Unauthorized' });
-    }
+    const { session, hater, delay, lastHater, groupIds } = req.body;
+    const sess = getOrCreateSession(session);
 
-    const bState = getBulkState(clientId);
-    if (bState.running) {
+    if (!sess.isPaired || !sess.sock) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running. Please STOP it first.' });
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sess.name + '.' });
+    }
+    if (sess.bulkState.running) {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+      return res.status(400).json({ success: false, error: 'A task is already running on session ' + sess.name + '.' });
     }
     if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Please upload a .txt file (each line = one message)' });
+      return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
     }
 
     let messages = [];
     try {
-      messages = parseMessagesFile(req.file.path);
+      const content = fs.readFileSync(req.file.path, 'utf8');
+      const seen = new Set();
+      content.split(/\r?\n/).forEach((line) => {
+        const t = line.trim();
+        if (t && !seen.has(t)) {
+          seen.add(t);
+          messages.push(t);
+        }
+      });
     } finally {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
 
     if (!messages.length) {
-      return res.status(400).json({ success: false, error: 'No valid messages found (all empty/duplicate)' });
+      return res.status(400).json({ success: false, error: 'No valid messages found' });
     }
 
     const targets = [];
-    const seen = new Set();
+    const seenT = new Set();
     let parsedGroups = [];
     try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
     parsedGroups.forEach((jid) => {
-      if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
+      if (jid && !seenT.has(jid)) { seenT.add(jid); targets.push({ jid, label: jid }); }
     });
 
     if (!targets.length) {
-      return res.status(400).json({ success: false, error: 'No targets — select at least one group' });
+      return res.status(400).json({ success: false, error: 'No target groups selected' });
     }
 
     let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS;
     if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
-    const waitMs = delaySec * 1000;
 
     const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
     const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
-    bState.running = true;
-    bState.stopFlag = false;
-    bState.sessionId = sessionId;
-    bState.sent = 0;
-    bState.failed = 0;
-    bState.tasks += 1;
-    bState.total = messages.length;
-    bState.remaining = messages.length;
-    bState.cycle = 0;
-    bState.msgIndex = 0;
-    bState.targetIndex = 0;
-    bState.totalTargets = targets.length;
-    bState.currentMessage = preparedMessages[0] || '';
-    bState.currentTarget = targets[0] ? targets[0].label : '';
-    bState.targets = targets;
-    bState.messages = preparedMessages;
-    bState.delayMs = waitMs;
-    bState.startedAt = Date.now();
-    bState.workerAlive = false;
-    bState.lastBeat = Date.now();
+    sess.bulkState.running = true;
+    sess.bulkState.stopFlag = false;
+    sess.bulkState.sent = 0;
+    sess.bulkState.failed = 0;
+    sess.bulkState.tasks += 1;
+    sess.bulkState.total = messages.length;
+    sess.bulkState.remaining = messages.length;
+    sess.bulkState.cycle = 0;
+    sess.bulkState.msgIndex = 0;
+    sess.bulkState.targetIndex = 0;
+    sess.bulkState.totalTargets = targets.length;
+    sess.bulkState.currentMessage = preparedMessages[0] || '';
+    sess.bulkState.currentTarget = targets[0] ? targets[0].label : '';
+    sess.bulkState.targets = targets;
+    sess.bulkState.messages = preparedMessages;
+    sess.bulkState.delayMs = delaySec * 1000;
+    sess.bulkState.startedAt = Date.now();
+    sess.bulkState.workerAlive = false;
+    sess.bulkState.lastBeat = Date.now();
 
-    pushLog(bState, 'info', `Task #${bState.tasks} started — ${messages.length} messages × ${targets.length} targets, delay ${delaySec}s`);
-    pushLog(bState, 'info', 'Loop mode: 24/7 continuous. Press Emergency Stop to halt.');
+    sess.pushLog('info', `Task #${sess.bulkState.tasks} started — ${messages.length} messages × ${targets.length} targets`);
 
-    runWorker(clientId);
+    sess.runWorker();
+
+    res.json({ success: true, total: messages.length, totalTargets: targets.length });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post('/api/bulk/stop', (req, res) => {
+  const { session } = req.body;
+  const sess = getOrCreateSession(session);
+  if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
+  sess.bulkState.stopFlag = true;
+  sess.pushLog('warn', 'Stop signal received — halting loop');
+  res.json({ success: true });
+});
+
+app.get('/api/bulk/status', (req, res) => {
+  const sessName = req.query.session || 'default';
+  const sess = getOrCreateSession(sessName);
+  res.json({
+    running: sess.bulkState.running,
+    workerAlive: sess.bulkState.workerAlive,
+    paired: sess.isPaired,
+    sent: sess.bulkState.sent,
+    failed: sess.bulkState.failed,
+    tasks: sess.bulkState.tasks,
+    total: sess.bulkState.total,
+    remaining: sess.bulkState.remaining,
+    cycle: sess.bulkState.cycle,
+    msgIndex: sess.bulkState.msgIndex,
+    targetIndex: sess.bulkState.targetIndex,
+    totalTargets: sess.bulkState.totalTargets,
+    currentMessage: sess.bulkState.currentMessage,
+    currentTarget: sess.bulkState.currentTarget,
+    uptimeFormatted: formatUptime(Date.now() - serverStartTime),
+    logs: sess.bulkState.logs.slice(-200),
+  });
+});
+
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
+
+app.listen(PORT, HOST, () => {
+  console.log('\n🌐 Multi-Session Dashboard: http://' + HOST + ':' + PORT + '/\n');
+});
+
+process.on('SIGTERM', () => process.exit(0));
+process.on('SIGINT', () => process.exit(0));
