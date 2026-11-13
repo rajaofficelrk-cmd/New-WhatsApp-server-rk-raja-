@@ -1,9 +1,14 @@
+
 {
-  "name": "nouman-x-yamdhut",
+  "name": "rk-raja-dashboard",
   "version": "1.0.0",
+  "description": "RK RAJA WhatsApp Control Dashboard",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
+  },
+  "engines": {
+    "node": ">=20"
   },
   "dependencies": {
     "@hapi/boom": "^10.0.1",
