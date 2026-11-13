@@ -223,13 +223,13 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
-      // FIXED: Using Browsers.macOS('Chrome') to bypass server restrictions against pairing code generation
+      // FIXED: Using standard Desktop browser header config to prevent pairing rejection
       this.sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Chrome'),
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: true,
         connectTimeoutMs: 60000,
@@ -264,7 +264,8 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            await new Promise((r) => setTimeout(r, 5000)); // 5 seconds stabilized handshake delay
+            // Increased delay to 6 seconds to let websocket fully establish secure handshake
+            await new Promise((r) => setTimeout(r, 6000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
             this.lastError = null;
