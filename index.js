@@ -877,11 +877,7 @@ function renderSessionCard(s){
       '<button class="ghost" onclick="logoutSession(\''+s.id+'\')">🚪 Logout</button>'+
       '</div>';
   }else if(s.code){
-    body='<div class="pair-code-box">'+
-      '<div class="code-label">✨ Your Pairing Code ✨</div>'+
-      '<div class="code-value">'+escapeHtml(s.code)+'</div>'+
-      '</div>'+
-      '<div class="steps-cute">1. Open WhatsApp 📱<br>2. Linked Devices → Link a Device<br>3. Enter the code above 💕</div>'+
+    body='<div class="connecting-msg">⏳ Waiting for link... Code upar button ke niche hai. 💫</div>'+
       '<div class="btn-row">'+
       '<button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Cancel</button>'+
       '</div>';
@@ -932,46 +928,21 @@ async function startPair(){
       body:JSON.stringify({phone:phone})
     });
     var d = await res.json();
+    
     if(!d.success) throw new Error(d.error||'Failed');
     
-    showMsg(msgEl, 'ok', 'Code generate ho raha hai, kripya pratiksha karein...');
+    // SUCCESS! Show the code directly below the button
     codeArea.classList.remove('hidden');
-    codeVal.textContent = 'WAIT...';
-
-    // Poll for the code specifically for this new session
-    let attempts = 0;
-    let interval = setInterval(async () => {
-      attempts++;
-      if(attempts > 30) { // 30 seconds timeout
-        clearInterval(interval);
-        codeVal.textContent = 'TIMEOUT';
-        showMsg(msgEl, 'err', 'Code generate nahi hua. Network ya number check karein.');
-        btn.disabled = false;
-        btn.textContent = '🔗 Get Pairing Code';
-        return;
-      }
-      
-      var sRes = await fetch('/api/sessions');
-      var sData = await sRes.json();
-      var mySession = sData.sessions.find(s => s.id === d.id);
-      
-      if (mySession && mySession.code) {
-        clearInterval(interval);
-        codeVal.textContent = mySession.code;
-        showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
-        btn.disabled = false;
-        btn.textContent = '🔗 Get Pairing Code';
-      } else if (mySession && mySession.paired) {
-        clearInterval(interval);
-        codeArea.classList.add('hidden');
-        showMsg(msgEl, 'ok', 'Successfully Linked! 🎉');
-        btn.disabled = false;
-        btn.textContent = '🔗 Get Pairing Code';
-      }
-    }, 1000);
+    codeVal.textContent = d.code;
+    showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
+    
+    // Refresh session list silently
+    lastSessionsJson = '';
+    loadSessions();
 
   } catch(e) {
     showMsg(msgEl, 'err', '❌ ' + e.message);
+  } finally {
     btn.disabled = false;
     btn.textContent = '🔗 Get Pairing Code';
   }
@@ -1273,12 +1244,16 @@ const upload = multer({ dest: uploadsDir });
 // -------- Direct Pairing --------
 app.post('/api/pair-new', async (req, res) => {
   try {
-    const { phone } = req.body;
+    let { phone } = req.body;
     if (!phone || !/^\d{10,15}$/.test(phone)) {
       return res.status(400).json({ success: false, error: 'Invalid phone number. Country code ke sath dalein (bina + ke).' });
     }
     
-    // Auto generate a unique session ID
+    // Agar user ne sirf 10 digit dala hai, toh automatically 91 laga do
+    if (phone.length === 10) {
+      phone = '91' + phone;
+    }
+
     const id = 'session_' + phone.slice(-4) + '_' + Date.now().toString().slice(-4);
     const s = ensureSession(id);
     
@@ -1288,7 +1263,22 @@ app.post('/api/pair-new', async (req, res) => {
       s.lastError = e.message;
     });
 
-    res.json({ success: true, message: 'Pairing initiated', id });
+    // WAIT for code to generate before responding
+    let attempts = 0;
+    const interval = setInterval(() => {
+      attempts++;
+      if (s.pairingCode) {
+        clearInterval(interval);
+        res.json({ success: true, code: s.pairingCode, id });
+      } else if (s.lastError) {
+        clearInterval(interval);
+        res.status(400).json({ success: false, error: s.lastError });
+      } else if (attempts > 20) {
+        clearInterval(interval);
+        res.status(500).json({ success: false, error: 'Timeout. Check number or try again.' });
+      }
+    }, 500);
+
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
