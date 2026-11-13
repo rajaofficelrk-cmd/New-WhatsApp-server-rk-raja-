@@ -8,60 +8,25 @@ const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
 const fs = require('fs');
+const path = require('path');
 const multer = require('multer');
 
 const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
-const AUTH_DIR = 'auth_info_baileys';
+const SESSIONS_BASE_DIR = 'sessions_data';
+
+if (!fs.existsSync(SESSIONS_BASE_DIR)) {
+  fs.mkdirSync(SESSIONS_BASE_DIR, { recursive: true });
+}
 
 const MIN_DELAY_SECONDS = 3;
 const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
-const WATCHDOG_INTERVAL_MS = 10000; // Har 10 second me check karega aur loop ko zinda rakhega
+const WATCHDOG_INTERVAL_MS = 10000;
 
-let sock = null;
-let pairingCode = null;
-let isPaired = false;
-let currentPhone = null;
-let pairingRequested = false;
-let isConnecting = false;
-let lastError = null;
-let connectedAt = null;
+const sessions = {};
 let serverStartTime = Date.now();
-
-let groupsCache = {};
-
-const bulkState = {
-  running: false,
-  stopFlag: false,
-  sent: 0,
-  failed: 0,
-  tasks: 0,
-  total: 0,
-  remaining: 0,
-  cycle: 0,
-  msgIndex: 0,
-  targetIndex: 0,
-  totalTargets: 0,
-  currentMessage: '',
-  currentTarget: '',
-  targets: [],
-  messages: [],
-  delayMs: DEFAULT_DELAY_SECONDS * 1000,
-  logs: [],
-  logId: 0,
-  startedAt: null,
-  workerAlive: false,
-  lastBeat: 0,
-};
-
-function pushLog(type, msg) {
-  bulkState.logs.push({ id: ++bulkState.logId, ts: Date.now(), type, msg });
-  if (bulkState.logs.length > 500) bulkState.logs.splice(0, bulkState.logs.length - 500);
-  const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
-  console.log(`${icons[type] || '•'} ${msg}`);
-}
 
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
@@ -71,290 +36,358 @@ function formatUptime(ms) {
   return `${h}:${m}:${sec}`;
 }
 
-function getGroupsFromStore() {
-  const out = [];
-  try {
-    if (sock && sock.store && sock.store.groupMetadata) {
-      const map = sock.store.groupMetadata;
-      map.forEach((v) => {
-        out.push({
-          id: v.id,
-          name: v.subject || '',
-          size: v.participants ? v.participants.length : 0,
+class WhatsAppSession {
+  constructor(name) {
+    this.name = name;
+    this.authDir = path.join(SESSIONS_BASE_DIR, name);
+    this.sock = null;
+    this.pairingCode = null;
+    this.isPaired = false;
+    this.currentPhone = null;
+    this.pairingRequested = false;
+    this.isConnecting = false;
+    this.lastError = null;
+    this.connectedAt = null;
+    this.groupsCache = {};
+
+    this.bulkState = {
+      running: false,
+      stopFlag: false,
+      sent: 0,
+      failed: 0,
+      tasks: 0,
+      total: 0,
+      remaining: 0,
+      cycle: 0,
+      msgIndex: 0,
+      targetIndex: 0,
+      totalTargets: 0,
+      currentMessage: '',
+      currentTarget: '',
+      targets: [],
+      messages: [],
+      delayMs: DEFAULT_DELAY_SECONDS * 1000,
+      logs: [],
+      logId: 0,
+      startedAt: null,
+      workerAlive: false,
+      lastBeat: 0,
+    };
+  }
+
+  pushLog(type, msg) {
+    this.bulkState.logs.push({ id: ++this.bulkState.logId, ts: Date.now(), type, msg });
+    if (this.bulkState.logs.length > 500) this.bulkState.logs.splice(0, this.bulkState.logs.length - 500);
+    const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
+    console.log(`[${this.name}] ${icons[type] || '•'} ${msg}`);
+  }
+
+  isSocketReady() {
+    return !!(this.sock && this.isPaired);
+  }
+
+  getGroupsFromStore() {
+    const out = [];
+    try {
+      if (this.sock && this.sock.store && this.sock.store.groupMetadata) {
+        const map = this.sock.store.groupMetadata;
+        map.forEach((v) => {
+          out.push({
+            id: v.id,
+            name: v.subject || '',
+            size: v.participants ? v.participants.length : 0,
+          });
+        });
+      }
+    } catch (_) {}
+    return out;
+  }
+
+  async safeSend(jid, text) {
+    let lastErr = null;
+    for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
+      try {
+        if (!this.isSocketReady()) throw new Error('socket not ready');
+        await this.sock.sendMessage(jid, { text });
+        return { ok: true };
+      } catch (e) {
+        lastErr = e;
+        if (attempt < SEND_RETRY) {
+          this.pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
+          await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
+        }
+      }
+    }
+    return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
+  }
+
+  async runWorker() {
+    if (this.bulkState.workerAlive) return;
+    this.bulkState.workerAlive = true;
+    this.pushLog('info', 'Background Live Worker started — 24/7 continuous mode active');
+
+    try {
+      while (!this.bulkState.stopFlag) {
+        this.bulkState.lastBeat = Date.now();
+
+        if (!this.isSocketReady()) {
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
+        }
+
+        if (!this.bulkState.messages.length || !this.bulkState.targets.length) {
+          await new Promise((r) => setTimeout(r, 2000));
+          continue;
+        }
+
+        for (let mi = 0; mi < this.bulkState.messages.length && !this.bulkState.stopFlag; mi++) {
+          const msg = this.bulkState.messages[mi];
+          this.bulkState.msgIndex = mi;
+          this.bulkState.currentMessage = msg;
+
+          for (let ti = 0; ti < this.bulkState.targets.length && !this.bulkState.stopFlag; ti++) {
+            const t = this.bulkState.targets[ti];
+            this.bulkState.targetIndex = ti;
+            this.bulkState.currentTarget = t.label;
+            this.bulkState.lastBeat = Date.now();
+
+            if (!this.isSocketReady()) {
+              this.pushLog('warn', 'Socket temporary drop — pausing until reconnection...');
+              while (!this.isSocketReady() && !this.bulkState.stopFlag) {
+                await new Promise((r) => setTimeout(r, 3000));
+              }
+            }
+
+            if (this.bulkState.stopFlag) break;
+
+            try {
+              const res = await this.safeSend(t.jid, msg);
+              if (res.ok) {
+                this.bulkState.sent++;
+                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → ${t.label}`);
+              } else {
+                this.bulkState.failed++;
+                this.pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
+              }
+            } catch (e) {
+              this.bulkState.failed++;
+              this.pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
+            }
+
+            this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
+
+            if (!this.bulkState.stopFlag) {
+              await new Promise((r) => setTimeout(r, this.bulkState.delayMs));
+            }
+          }
+          if (this.bulkState.stopFlag) break;
+        }
+
+        if (!this.bulkState.stopFlag) {
+          this.bulkState.cycle++;
+          this.bulkState.remaining = this.bulkState.messages.length;
+          this.bulkState.msgIndex = 0;
+          this.bulkState.targetIndex = 0;
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} finished successfully — looping back to Message 1.`);
+        }
+      }
+    } catch (loopErr) {
+      this.pushLog('err', 'Worker unexpected exception: ' + loopErr.message);
+    } finally {
+      this.bulkState.workerAlive = false;
+      if (this.bulkState.stopFlag) {
+        this.bulkState.running = false;
+        this.bulkState.stopFlag = false;
+        this.bulkState.currentMessage = '';
+        this.bulkState.currentTarget = '';
+        this.pushLog('warn', `Task explicitly stopped. Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}`);
+      } else if (this.bulkState.running) {
+        this.pushLog('warn', 'Worker heartbeat restarting loop instantly...');
+        setTimeout(() => this.runWorker(), 1000);
+      }
+    }
+  }
+
+  async connect(phone) {
+    if (!phone) throw new Error('Phone number required');
+    if (this.isConnecting) throw new Error('Connection already in progress');
+    if (this.isPaired) throw new Error('Already paired');
+
+    this.isConnecting = true;
+    this.currentPhone = phone;
+    this.pairingCode = null;
+    this.lastError = null;
+
+    try {
+      const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
+      const { version } = await fetchLatestBaileysVersion();
+
+      // FIXED: Optimized socket config with native mobile handshake support to resolve "Couldn't link device"
+      this.sock = makeWASocket({
+        version,
+        auth: state,
+        printQRInTerminal: false,
+        logger: pino({ level: 'silent' }),
+        browser: ['Chrome (Linux)', 'Chrome', '120.0.0.0'],
+        mobile: false,
+        syncFullHistory: false,
+        markOnlineOnConnect: true,
+        connectTimeoutMs: 60000,
+        defaultQueryTimeoutMs: 60000,
+      });
+
+      this.sock.ev.on('creds.update', saveCreds);
+
+      this.sock.ev.on('groups.upsert', (groups) => {
+        groups.forEach((g) => {
+          this.groupsCache[g.id] = {
+            id: g.id,
+            name: g.subject || '',
+            size: g.participants ? g.participants.length : 0,
+          };
         });
       });
-    }
-  } catch (_) {}
-  return out;
-}
 
-function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-function isSocketReady() {
-  return !!(sock && isPaired);
-}
-
-function parseMessagesFile(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
-  const seen = new Set();
-  const out = [];
-  content.split(/\r?\n/).forEach((line) => {
-    const t = line.trim();
-    if (!t) return;
-    if (seen.has(t)) return;
-    seen.add(t);
-    out.push(t);
-  });
-  return out;
-}
-
-async function safeSend(jid, text) {
-  let lastErr = null;
-  for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
-    try {
-      if (!isSocketReady()) throw new Error('socket not ready');
-      await sock.sendMessage(jid, { text });
-      return { ok: true };
-    } catch (e) {
-      lastErr = e;
-      if (attempt < SEND_RETRY) {
-        pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
-        await sleep(RETRY_WAIT_MS);
-      }
-    }
-  }
-  return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
-}
-
-// ===== 24/7 UNSTOPPABLE BACKGROUND WORKER LOOP =====
-async function runWorker() {
-  if (bulkState.workerAlive) return;
-  bulkState.workerAlive = true;
-  pushLog('info', 'Background Live Worker started — 24/7 continuous mode active');
-
-  try {
-    while (!bulkState.stopFlag) {
-      bulkState.lastBeat = Date.now();
-
-      // Agar socket ready nahi hai, toh task band nahi hoga balki wait karega jab tak reconnect na ho jaye
-      if (!isSocketReady()) {
-        await sleep(3000);
-        continue;
-      }
-
-      if (!bulkState.messages.length || !bulkState.targets.length) {
-        await sleep(2000);
-        continue;
-      }
-
-      for (let mi = 0; mi < bulkState.messages.length && !bulkState.stopFlag; mi++) {
-        const msg = bulkState.messages[mi];
-        bulkState.msgIndex = mi;
-        bulkState.currentMessage = msg;
-
-        for (let ti = 0; ti < bulkState.targets.length && !bulkState.stopFlag; ti++) {
-          const t = bulkState.targets[ti];
-          bulkState.targetIndex = ti;
-          bulkState.currentTarget = t.label;
-          bulkState.lastBeat = Date.now();
-
-          if (!isSocketReady()) {
-            pushLog('warn', 'Socket temporary drop detected — pausing briefly until reconnection...');
-            while (!isSocketReady() && !bulkState.stopFlag) {
-              await sleep(3000);
-            }
+      this.sock.ev.on('groups.update', (updates) => {
+        updates.forEach((u) => {
+          if (this.groupsCache[u.id]) {
+            if (u.subject) this.groupsCache[u.id].name = u.subject;
+          } else if (u.id) {
+            this.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
           }
+        });
+      });
 
-          if (bulkState.stopFlag) break;
+      this.sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
 
+        if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
+          this.pairingRequested = true;
           try {
-            const res = await safeSend(t.jid, msg);
-            if (res.ok) {
-              bulkState.sent++;
-              pushLog('ok', `Cycle ${bulkState.cycle + 1} | Msg ${mi + 1}/${bulkState.messages.length} → ${t.label}`);
-            } else {
-              bulkState.failed++;
-              pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
-            }
-          } catch (e) {
-            bulkState.failed++;
-            pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
-          }
-
-          bulkState.remaining = bulkState.messages.length - (mi + 1);
-
-          if (!bulkState.stopFlag) {
-            await sleep(bulkState.delayMs);
+            await new Promise((r) => setTimeout(r, 4000)); // 4s stabilization delay for WhatsApp server handshake
+            this.pairingCode = await this.sock.requestPairingCode(phone);
+            this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
+            this.lastError = null;
+          } catch (err) {
+            this.pushLog('err', 'Pairing code error: ' + err.message);
+            this.lastError = err.message;
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.isConnecting = false;
           }
         }
-        if (bulkState.stopFlag) break;
-      }
 
-      if (!bulkState.stopFlag) {
-        bulkState.cycle++;
-        bulkState.remaining = bulkState.messages.length;
-        bulkState.msgIndex = 0;
-        bulkState.targetIndex = 0;
-        pushLog('info', `Cycle ${bulkState.cycle} finished successfully — looping back to Message 1 automatically.`);
-      }
+        if (connection === 'open') {
+          this.isPaired = true;
+          this.pairingCode = null;
+          this.pairingRequested = false;
+          this.isConnecting = false;
+          this.connectedAt = new Date().toISOString();
+          this.lastError = null;
+          this.pushLog('ok', `WhatsApp connected successfully (${phone})`);
+
+          setTimeout(() => {
+            try {
+              const groups = this.getGroupsFromStore();
+              groups.forEach((g) => { this.groupsCache[g.id] = g; });
+              this.pushLog('info', `Loaded ${groups.length} groups into cache`);
+            } catch (e) {}
+          }, 3000);
+
+          if (this.bulkState.running && !this.bulkState.workerAlive) {
+            this.pushLog('info', 'Socket reopened — resuming background loop');
+            this.runWorker();
+          }
+        }
+
+        if (connection === 'close') {
+          const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+          this.pushLog('warn', `Connection closed (code ${statusCode})`);
+
+          this.isPaired = false;
+          this.isConnecting = false;
+
+          if (shouldReconnect && this.currentPhone) {
+            this.pairingRequested = false;
+            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
+          } else if (statusCode === DisconnectReason.loggedOut) {
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.currentPhone = null;
+            if (this.bulkState.running) {
+              this.bulkState.stopFlag = true;
+            }
+          }
+        }
+      });
+    } catch (err) {
+      this.isConnecting = false;
+      this.lastError = err.message;
+      throw err;
     }
-  } catch (loopErr) {
-    pushLog('err', 'Worker unexpected exception: ' + loopErr.message);
-  } finally {
-    bulkState.workerAlive = false;
-    if (bulkState.stopFlag) {
-      bulkState.running = false;
-      bulkState.stopFlag = false;
-      bulkState.currentMessage = '';
-      bulkState.currentTarget = '';
-      pushLog('warn', `Task explicitly stopped by user. Total Sent: ${bulkState.sent}, Failed: ${bulkState.failed}`);
-    } else if (bulkState.running) {
-      // Agar user ne stop nahi kiya aur koi error se loop ruka, toh auto-restart karega turant
-      pushLog('warn', 'Worker heartbeat restarting loop instantly...');
-      setTimeout(() => runWorker(), 1000);
+  }
+
+  async logout() {
+    if (this.bulkState.running) {
+      this.bulkState.stopFlag = true;
+      this.pushLog('warn', 'Logout — stopping worker');
     }
+    if (this.sock) { try { await this.sock.logout(); } catch (_) {} }
+    if (fs.existsSync(this.authDir)) fs.rmSync(this.authDir, { recursive: true, force: true });
+    this.isPaired = false;
+    this.pairingCode = null;
+    this.currentPhone = null;
+    this.pairingRequested = false;
+    this.isConnecting = false;
+    this.connectedAt = null;
+    this.lastError = null;
+    this.sock = null;
+    this.groupsCache = {};
+    this.pushLog('warn', 'Logged out, session auth cleared');
   }
 }
 
-// Watchdog jo ensure karega ki jab tak running flag true hai, background worker hamesha zinda rahe
+// Watchdog for all sessions
 setInterval(() => {
-  if (bulkState.running && (!bulkState.workerAlive || Date.now() - bulkState.lastBeat > 20000)) {
-    pushLog('warn', 'Watchdog triggered: reviving sleeping background worker...');
-    bulkState.workerAlive = false;
-    runWorker();
-  }
+  Object.values(sessions).forEach((sess) => {
+    if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
+      sess.pushLog('warn', 'Watchdog triggered: reviving sleeping worker...');
+      sess.bulkState.workerAlive = false;
+      sess.runWorker();
+    }
+  });
 }, WATCHDOG_INTERVAL_MS);
 
-async function connectToWhatsApp(phone) {
-  if (!phone) throw new Error('Phone number required');
-  if (isConnecting) throw new Error('Connection already in progress');
-  if (isPaired) throw new Error('Already paired');
-
-  isConnecting = true;
-  currentPhone = phone;
-  pairingCode = null;
-  lastError = null;
-
-  try {
-    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-    const { version } = await fetchLatestBaileysVersion();
-
-    sock = makeWASocket({
-      version,
-      auth: state,
-      printQRInTerminal: false,
-      logger: pino({ level: 'silent' }),
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
-      mobile: false,
-      syncFullHistory: false,
-      markOnlineOnConnect: true,
-      connectTimeoutMs: 60000,
-      defaultQueryTimeoutMs: 60000,
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('groups.upsert', (groups) => {
-      groups.forEach((g) => {
-        groupsCache[g.id] = {
-          id: g.id,
-          name: g.subject || '',
-          size: g.participants ? g.participants.length : 0,
-        };
-      });
-    });
-
-    sock.ev.on('groups.update', (updates) => {
-      updates.forEach((u) => {
-        if (groupsCache[u.id]) {
-          if (u.subject) groupsCache[u.id].name = u.subject;
-        } else if (u.id) {
-          groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
-        }
-      });
-    });
-
-    sock.ev.on('connection.update', async (update) => {
-      const { connection, lastDisconnect } = update;
-
-      if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
-        pairingRequested = true;
-        try {
-          await sleep(4000);
-          pairingCode = await sock.requestPairingCode(phone);
-          console.log(`\n📱 PAIRING CODE for ${phone}: ${pairingCode}\n`);
-          pushLog('info', `Pairing code generated: ${pairingCode}`);
-          lastError = null;
-        } catch (err) {
-          console.error('❌ Pairing code error:', err.message);
-          lastError = err.message;
-          pairingCode = null;
-          pairingRequested = false;
-          isConnecting = false;
-        }
-      }
-
-      if (connection === 'open') {
-        console.log('✅ WhatsApp connected successfully!');
-        isPaired = true;
-        pairingCode = null;
-        pairingRequested = false;
-        isConnecting = false;
-        connectedAt = new Date().toISOString();
-        lastError = null;
-        pushLog('ok', `WhatsApp connected (${phone})`);
-
-        setTimeout(() => {
-          try {
-            const groups = getGroupsFromStore();
-            groups.forEach((g) => { groupsCache[g.id] = g; });
-            pushLog('info', `Loaded ${groups.length} groups into cache`);
-          } catch (e) {}
-        }, 3000);
-
-        if (bulkState.running && !bulkState.workerAlive) {
-          pushLog('info', 'Socket reopened — resuming background loop');
-          runWorker();
-        }
-      }
-
-      if (connection === 'close') {
-        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        pushLog('warn', `Connection closed (code ${statusCode})`);
-
-        isPaired = false;
-        isConnecting = false;
-
-        if (shouldReconnect && currentPhone) {
-          pairingRequested = false;
-          setTimeout(() => connectToWhatsApp(currentPhone).catch(() => {}), 3000);
-        } else if (statusCode === DisconnectReason.loggedOut) {
-          pairingCode = null;
-          pairingRequested = false;
-          currentPhone = null;
-          if (bulkState.running) {
-            bulkState.stopFlag = true;
-          }
-        }
-      }
-    });
-  } catch (err) {
-    isConnecting = false;
-    lastError = err.message;
-    throw err;
+function getOrCreateSession(name) {
+  const cleanName = (name || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  if (!sessions[cleanName]) {
+    sessions[cleanName] = new WhatsAppSession(cleanName);
   }
+  return sessions[cleanName];
 }
 
-// ===== NEW LIVE ANIMATED CYBERPUNK THEME HTML =====
+// Load existing sessions from disk on startup
+if (fs.existsSync(SESSIONS_BASE_DIR)) {
+  fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
+    if (dirent.isDirectory()) {
+      getOrCreateSession(dirent.name);
+    }
+  });
+}
+if (Object.keys(sessions).length === 0) {
+  getOrCreateSession('default');
+}
+
+// ============================================================
+// LIVE CYBERPUNK THEME DASHBOARD UI WITH MULTI-SESSION SUPPORT
+// ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD — Live Cyberpunk Control Center</title>
+<title>RK RAJA XWD — Multi-Session Cyber Control Center</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
   
@@ -365,7 +398,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     background:#030305;color:#e2e8f0;min-height:100vh;overflow-x:hidden;position:relative;
   }
 
-  /* Live Animated Neon Background Theme */
   .live-bg{
     position:fixed;inset:0;z-index:-3;pointer-events:none;background:#030305;
     overflow:hidden;
@@ -581,15 +613,26 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="container">
   <div class="brand">
     <h1>RK <span class="x">X</span> RAJA</h1>
-    <p>Live Cyberpunk Control Center</p>
+    <p>Multi-Session Cyber Control Center</p>
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
+    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard & Pairing</div>
     <div class="tab" data-tab="sender" onclick="switchTab('sender')">Bulk Sender Hub</div>
   </div>
 
   <div class="panel active" id="panel-dashboard">
+    <div class="card">
+      <h2><span class="dot"></span>Select or Create Session</h2>
+      <div class="field">
+        <label>Active Session Name</label>
+        <div style="display:flex;gap:10px">
+          <select id="dashSessionSelect" onchange="onSessionChange()"></select>
+          <button class="ghost" style="width:auto;margin-top:0" onclick="createNewSessionPrompt()">+ New Session</button>
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="status-row">
         <h2 style="margin:0"><span class="dot"></span>Connection Status</h2>
@@ -646,14 +689,22 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <h2><span class="dot"></span>Danger Zone</h2>
-      <p class="hint">Logout deletes session auth — requires re-pairing.</p>
-      <button class="ghost" onclick="logout()">Logout / Reset Session</button>
+      <p class="hint">Logout deletes session auth for this specific session.</p>
+      <button class="ghost" onclick="logout()">Logout / Delete Session</button>
     </div>
   </div>
 
   <div class="panel" id="panel-sender">
     <div class="layout">
       <div>
+        <div class="card">
+          <h2><span class="dot"></span>Select Session</h2>
+          <div class="field">
+            <label>Active Sender Session</label>
+            <select id="senderSessionSelect" onchange="syncSessionDropdowns(this.value)"></select>
+          </div>
+        </div>
+
         <div class="card">
           <h2><span class="dot"></span>Message Queue & Targets</h2>
 
@@ -727,7 +778,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Live Cyber Log</h2>
           <div class="log" id="logBox">
-            <div class="line"><span class="t">[boot]</span> Cyberpunk system initialized. Ready...</div>
+            <div class="line"><span class="t">[boot]</span> Multi-session cyberpunk system initialized. Ready...</div>
           </div>
           <div class="btnrow" style="margin-top:14px">
             <button class="ghost" onclick="clearLog()">Clear Log</button>
@@ -738,10 +789,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD 💀 © — Live Cyberpunk Edition</div>
+  <div class="footer">RK RAJA XWD 💀 © — Multi-Session Cyber Edition</div>
 </div>
 
 <script>
+let currentSession = 'default';
+
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
@@ -759,6 +812,56 @@ function log(type,msg){
   box.scrollTop=box.scrollHeight;
   while(box.children.length>500) box.removeChild(box.firstChild);
 }
+
+async function loadSessions(){
+  try{
+    const res = await fetch('/api/sessions');
+    const d = await res.json();
+    if(d.sessions){
+      const opts = d.sessions.map(s => '<option value="'+s+'" '+(s===currentSession?'selected':'')+'>'+s+'</option>').join('');
+      document.getElementById('dashSessionSelect').innerHTML = opts;
+      document.getElementById('senderSessionSelect').innerHTML = opts;
+      if(!d.sessions.includes(currentSession) && d.sessions.length){
+        currentSession = d.sessions[0];
+      }
+    }
+  }catch(e){console.error(e);}
+}
+
+function onSessionChange(){
+  currentSession = document.getElementById('dashSessionSelect').value;
+  document.getElementById('senderSessionSelect').value = currentSession;
+  allGroups = [];
+  dashSelected.clear();
+  bulkSelected.clear();
+  renderDashGroups();
+  renderBulkGroups();
+  clearLog();
+}
+
+function syncSessionDropdowns(val){
+  currentSession = val;
+  document.getElementById('dashSessionSelect').value = currentSession;
+  allGroups = [];
+  dashSelected.clear();
+  bulkSelected.clear();
+  renderDashGroups();
+  renderBulkGroups();
+  clearLog();
+}
+
+async function createNewSessionPrompt(){
+  const name = prompt('Enter new session name (e.g. session2, bot2):');
+  if(!name) return;
+  const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  if(!clean) return;
+  currentSession = clean;
+  await loadSessions();
+  document.getElementById('dashSessionSelect').value = currentSession;
+  document.getElementById('senderSessionSelect').value = currentSession;
+  onSessionChange();
+}
+
 async function startPair(){
   const phone=document.getElementById('phoneInput').value.trim();
   const btn=document.getElementById('pairBtn');
@@ -767,7 +870,10 @@ async function startPair(){
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
-    const res=await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
+    const res=await fetch('/api/pair',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({phone, session: currentSession})
+    });
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
@@ -777,10 +883,19 @@ async function startPair(){
   }catch(e){showMsg(msgEl,'err',e.message);}
   finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
 }
+
 async function logout(){
-  if(!confirm('Logout? Auth will be deleted.'))return;
-  try{await fetch('/api/logout',{method:'POST'});location.reload();}catch(e){alert(e.message);}
+  if(!confirm('Logout session "'+currentSession+'"? Auth will be deleted.'))return;
+  try{
+    await fetch('/api/logout',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session: currentSession})
+    });
+    await loadSessions();
+    onSessionChange();
+  }catch(e){alert(e.message);}
 }
+
 let allGroups=[];
 let dashSelected=new Set();
 let bulkSelected=new Set();
@@ -791,7 +906,7 @@ async function fetchGroups(){
   btn.disabled=true;btn.textContent='Fetching...';
   listEl.innerHTML='<div class="empty">Loading groups...</div>';
   try{
-    const res=await fetch('/api/groups');
+    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession));
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed to fetch');
     allGroups = d.groups || [];
@@ -809,7 +924,7 @@ function renderDashGroups(){
   const listEl=document.getElementById('groupsList');
   document.getElementById('groupsCount').textContent=allGroups.length+' groups';
   if(!allGroups.length){
-    listEl.innerHTML='<div class="empty">No groups found for this WhatsApp account</div>';
+    listEl.innerHTML='<div class="empty">No groups found for this session</div>';
     return;
   }
   listEl.innerHTML = allGroups.map(g=>{
@@ -844,7 +959,7 @@ async function sendToSelectedGroups(){
   try{
     const res=await fetch('/api/send-groups',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({groupIds:[...dashSelected], message:msg})
+      body:JSON.stringify({session: currentSession, groupIds:[...dashSelected], message:msg})
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
@@ -921,13 +1036,14 @@ async function startServer(){
   startBtn.disabled=true;startBtn.textContent='Starting...';
 
   const fd=new FormData();
+  fd.append('session', currentSession);
   fd.append('file',file);
   fd.append('hater',hater);
   fd.append('delay',String(delay));
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
 
-  log('info','Starting 24/7 continuous task...');
+  log('info','Starting 24/7 continuous task for session: '+currentSession);
   try{
     const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     const d=await res.json();
@@ -943,15 +1059,19 @@ async function startServer(){
 }
 async function stopTask(){
   try{
-    const res=await fetch('/api/bulk/stop',{method:'POST'});
+    const res=await fetch('/api/bulk/stop',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({session: currentSession})
+    });
     const d=await res.json();
-    if(d.success) log('warn','Emergency stop executed successfully');
+    if(d.success) log('warn','Emergency stop executed for session: '+currentSession);
     else log('err',d.error||'No task running');
   }catch(e){log('err',e.message);}
 }
+
 async function pollStatus(){
   try{
-    const res=await fetch('/api/status');
+    const res=await fetch('/api/status?session='+encodeURIComponent(currentSession));
     const d=await res.json();
     const badge=document.getElementById('badge');
     const infoPhone=document.getElementById('infoPhone');
@@ -962,6 +1082,7 @@ async function pollStatus(){
     const pairCard=document.getElementById('pairCard');
     const phoneInput=document.getElementById('phoneInput');
     const pairBtn=document.getElementById('pairBtn');
+
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
     if(d.paired){
@@ -983,10 +1104,11 @@ async function pollStatus(){
     else{errBox.classList.add('hidden');}
   }catch(e){}
 }
+
 let lastLogId=0;
 async function pollStats(){
   try{
-    const res=await fetch('/api/bulk/status');
+    const res=await fetch('/api/bulk/status?session='+encodeURIComponent(currentSession));
     const d=await res.json();
     const statusEl=document.getElementById('statStatus');
     statusEl.textContent=d.running?'Running 24/7':'Idle';
@@ -1022,16 +1144,19 @@ async function pollStats(){
           box.appendChild(el);
         }
       });
-      lastLogId=d.logs[d.logs.length-1].id;
+      if(d.logs.length) lastLogId=d.logs[d.logs.length-1].id;
       box.scrollTop=box.scrollHeight;
       while(box.children.length>500) box.removeChild(box.firstChild);
     }
   }catch(e){}
 }
-setInterval(pollStatus,2000);
-setInterval(pollStats,1500);
-pollStatus();
-pollStats();
+
+loadSessions().then(()=>{
+  setInterval(pollStatus,2000);
+  setInterval(pollStats,1500);
+  pollStatus();
+  pollStats();
+});
 </script>
 </body>
 </html>`;
@@ -1043,20 +1168,27 @@ app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
+app.get('/api/sessions', (req, res) => {
+  const list = Object.keys(sessions);
+  if (!list.includes('default')) list.unshift('default');
+  res.json({ success: true, sessions: list });
+});
+
 app.post('/api/pair', async (req, res) => {
   try {
-    const { phone } = req.body;
+    const { phone, session } = req.body;
+    const sess = getOrCreateSession(session);
+
     if (!phone || !/^\d{10,15}$/.test(phone)) {
       return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
-    if (isPaired) return res.status(400).json({ success: false, error: 'Already paired. Logout first.' });
-    if (isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection in progress.' });
+    if (sess.isConnecting) {
+      return res.status(400).json({ success: false, error: 'Connection in progress' });
     }
-    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
 
-    connectToWhatsApp(phone).catch((e) => {
-      lastError = e.message;
+    sess.connect(phone).catch((e) => {
+      sess.lastError = e.message;
     });
 
     res.json({ success: true, message: 'Pairing initiated' });
@@ -1066,34 +1198,39 @@ app.post('/api/pair', async (req, res) => {
 });
 
 app.get('/api/status', (req, res) => {
+  const sessName = req.query.session || 'default';
+  const sess = getOrCreateSession(sessName);
   res.json({
-    paired: isPaired,
-    connecting: isConnecting,
-    code: isPaired ? null : pairingCode,
-    phone: currentPhone,
-    connectedAt,
-    error: lastError,
+    paired: sess.isPaired,
+    connecting: sess.isConnecting,
+    code: sess.isPaired ? null : sess.pairingCode,
+    phone: sess.currentPhone,
+    connectedAt: sess.connectedAt,
+    error: sess.lastError,
   });
 });
 
 app.get('/api/groups', async (req, res) => {
   try {
-    if (!isPaired || !sock) {
+    const sessName = req.query.session || 'default';
+    const sess = getOrCreateSession(sessName);
+
+    if (!sess.isPaired || !sess.sock) {
       return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
     }
 
     const map = new Map();
-    Object.values(groupsCache).forEach((g) => map.set(g.id, g));
+    Object.values(sess.groupsCache).forEach((g) => map.set(g.id, g));
 
     try {
-      getGroupsFromStore().forEach((g) => {
+      sess.getGroupsFromStore().forEach((g) => {
         if (!map.has(g.id)) map.set(g.id, g);
       });
     } catch (_) {}
 
-    if (map.size === 0 && typeof sock.groupFetchAllParticipating === 'function') {
+    if (map.size === 0 && typeof sess.sock.groupFetchAllParticipating === 'function') {
       try {
-        const all = await sock.groupFetchAllParticipating();
+        const all = await sess.sock.groupFetchAllParticipating();
         Object.values(all).forEach((g) => {
           map.set(g.id, {
             id: g.id,
@@ -1108,7 +1245,7 @@ app.get('/api/groups', async (req, res) => {
       .filter((g) => g.id && g.id.endsWith('@g.us'))
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-    groups.forEach((g) => { groupsCache[g.id] = g; });
+    groups.forEach((g) => { sess.groupsCache[g.id] = g; });
 
     res.json({ success: true, groups });
   } catch (err) {
@@ -1118,8 +1255,10 @@ app.get('/api/groups', async (req, res) => {
 
 app.post('/api/send-groups', async (req, res) => {
   try {
-    if (!isPaired || !sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
-    const { groupIds, message } = req.body;
+    const { session, groupIds, message } = req.body;
+    const sess = getOrCreateSession(session);
+
+    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
     if (!Array.isArray(groupIds) || !groupIds.length) {
       return res.status(400).json({ success: false, error: 'No groups selected' });
     }
@@ -1131,13 +1270,13 @@ app.post('/api/send-groups', async (req, res) => {
     const errors = [];
     for (const jid of groupIds) {
       try {
-        await sock.sendMessage(jid, { text: message });
+        await sess.sock.sendMessage(jid, { text: message });
         sent++;
       } catch (e) {
         failed++;
         errors.push(jid + ': ' + e.message);
       }
-      await sleep(800);
+      await new Promise((r) => setTimeout(r, 800));
     }
     res.json({ success: true, sent, failed, total: groupIds.length, errors });
   } catch (err) {
@@ -1147,17 +1286,13 @@ app.post('/api/send-groups', async (req, res) => {
 
 app.post('/api/logout', async (req, res) => {
   try {
-    if (bulkState.running) {
-      bulkState.stopFlag = true;
-      pushLog('warn', 'Logout — stopping background worker');
+    const { session } = req.body;
+    const sessName = session || 'default';
+    const sess = sessions[sessName];
+    if (sess) {
+      await sess.logout();
+      delete sessions[sessName];
     }
-    if (sock) { try { await sock.logout(); } catch (_) {} }
-    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
-    isPaired = false; pairingCode = null; currentPhone = null;
-    pairingRequested = false; isConnecting = false;
-    connectedAt = null; lastError = null; sock = null;
-    groupsCache = {};
-    pushLog('warn', 'Logged out, auth cleared');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
@@ -1166,11 +1301,14 @@ app.post('/api/logout', async (req, res) => {
 
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
-    if (!isPaired || !sock) {
+    const { session, hater, delay, lastHater, groupIds } = req.body;
+    const sess = getOrCreateSession(session);
+
+    if (!sess.isPaired || !sess.sock) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
       return res.status(400).json({ success: false, error: 'WhatsApp not paired yet.' });
     }
-    if (bulkState.running) {
+    if (sess.bulkState.running) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
       return res.status(400).json({ success: false, error: 'A task is already running.' });
     }
@@ -1178,11 +1316,17 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
     }
 
-    const { hater, delay, lastHater, groupIds } = req.body;
-
     let messages = [];
     try {
-      messages = parseMessagesFile(req.file.path);
+      const content = fs.readFileSync(req.file.path, 'utf8');
+      const seen = new Set();
+      content.split(/\r?\n/).forEach((line) => {
+        const t = line.trim();
+        if (t && !seen.has(t)) {
+          seen.add(t);
+          messages.push(t);
+        }
+      });
     } finally {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
@@ -1211,29 +1355,29 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
-    bulkState.running = true;
-    bulkState.stopFlag = false;
-    bulkState.sent = 0;
-    bulkState.failed = 0;
-    bulkState.tasks += 1;
-    bulkState.total = messages.length;
-    bulkState.remaining = messages.length;
-    bulkState.cycle = 0;
-    bulkState.msgIndex = 0;
-    bulkState.targetIndex = 0;
-    bulkState.totalTargets = targets.length;
-    bulkState.currentMessage = preparedMessages[0] || '';
-    bulkState.currentTarget = targets[0] ? targets[0].label : '';
-    bulkState.targets = targets;
-    bulkState.messages = preparedMessages;
-    bulkState.delayMs = waitMs;
-    bulkState.startedAt = Date.now();
-    bulkState.workerAlive = false;
-    bulkState.lastBeat = Date.now();
+    sess.bulkState.running = true;
+    sess.bulkState.stopFlag = false;
+    sess.bulkState.sent = 0;
+    sess.bulkState.failed = 0;
+    sess.bulkState.tasks += 1;
+    sess.bulkState.total = messages.length;
+    sess.bulkState.remaining = messages.length;
+    sess.bulkState.cycle = 0;
+    sess.bulkState.msgIndex = 0;
+    sess.bulkState.targetIndex = 0;
+    sess.bulkState.totalTargets = targets.length;
+    sess.bulkState.currentMessage = preparedMessages[0] || '';
+    sess.bulkState.currentTarget = targets[0] ? targets[0].label : '';
+    sess.bulkState.targets = targets;
+    sess.bulkState.messages = preparedMessages;
+    sess.bulkState.delayMs = waitMs;
+    sess.bulkState.startedAt = Date.now();
+    sess.bulkState.workerAlive = false;
+    sess.bulkState.lastBeat = Date.now();
 
-    pushLog('info', `24/7 Task launched — ${messages.length} messages × ${targets.length} targets`);
+    sess.pushLog('info', `24/7 Task launched — ${messages.length} messages × ${targets.length} targets`);
 
-    runWorker();
+    sess.runWorker();
 
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
   } catch (err) {
@@ -1242,38 +1386,41 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/bulk/stop', (req, res) => {
-  if (!bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
-  bulkState.stopFlag = true;
-  pushLog('warn', 'Emergency stop signal received from user');
+  const { session } = req.body;
+  const sess = getOrCreateSession(session);
+  if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
+  sess.bulkState.stopFlag = true;
+  sess.pushLog('warn', 'Emergency stop signal received from user');
   res.json({ success: true });
 });
 
 app.get('/api/bulk/status', (req, res) => {
+  const sessName = req.query.session || 'default';
+  const sess = getOrCreateSession(sessName);
   res.json({
-    running: bulkState.running,
-    workerAlive: bulkState.workerAlive,
-    paired: isPaired,
-    sent: bulkState.sent,
-    failed: bulkState.failed,
-    tasks: bulkState.tasks,
-    total: bulkState.total,
-    remaining: bulkState.remaining,
-    cycle: bulkState.cycle,
-    msgIndex: bulkState.msgIndex,
-    targetIndex: bulkState.targetIndex,
-    totalTargets: bulkState.totalTargets,
-    currentMessage: bulkState.currentMessage,
-    currentTarget: bulkState.currentTarget,
+    running: sess.bulkState.running,
+    workerAlive: sess.bulkState.workerAlive,
+    paired: sess.isPaired,
+    sent: sess.bulkState.sent,
+    failed: sess.bulkState.failed,
+    tasks: sess.bulkState.tasks,
+    total: sess.bulkState.total,
+    remaining: sess.bulkState.remaining,
+    cycle: sess.bulkState.cycle,
+    msgIndex: sess.bulkState.msgIndex,
+    targetIndex: sess.bulkState.targetIndex,
+    totalTargets: sess.bulkState.totalTargets,
+    currentMessage: sess.bulkState.currentMessage,
+    currentTarget: sess.bulkState.currentTarget,
     uptimeFormatted: formatUptime(Date.now() - serverStartTime),
-    logs: bulkState.logs.slice(-200),
+    logs: sess.bulkState.logs.slice(-200),
   });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok', paired: isPaired }));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Live Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
-  pushLog('info', 'Cyberpunk server started successfully');
+  console.log('\n🌐 Multi-Session Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.on('SIGTERM', () => process.exit(0));
