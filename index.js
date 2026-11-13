@@ -223,6 +223,7 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
+      // FIXED: Using standard Desktop browser header config to prevent pairing rejection
       this.sock = makeWASocket({
         version,
         auth: state,
@@ -263,6 +264,7 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
+            // Increased delay to 6 seconds to let websocket fully establish secure handshake
             await new Promise((r) => setTimeout(r, 6000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
@@ -849,24 +851,11 @@ async function createNewSessionPrompt(){
   if(!name) return;
   const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   if(!clean) return;
-  
-  try {
-    const res = await fetch('/api/sessions/create', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ session: clean })
-    });
-    const d = await res.json();
-    if(!d.success) throw new Error(d.error || 'Failed to create session');
-    currentSession = clean;
-    await loadSessions();
-    document.getElementById('dashSessionSelect').value = currentSession;
-    document.getElementById('senderSessionSelect').value = currentSession;
-    onSessionChange();
-    pollStatus();
-  } catch(e) {
-    alert(e.message);
-  }
+  currentSession = clean;
+  await loadSessions();
+  document.getElementById('dashSessionSelect').value = currentSession;
+  document.getElementById('senderSessionSelect').value = currentSession;
+  onSessionChange();
 }
 
 async function startPair(){
@@ -1092,7 +1081,6 @@ async function pollStatus(){
 
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
-    
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
       codeSection.classList.add('hidden');pairCard.classList.add('hidden');
@@ -1106,8 +1094,6 @@ async function pollStatus(){
       pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else{
       badge.textContent='Idle';badge.className='badge b-idle';
-      pairCard.classList.remove('hidden'); // FIXED: Always ensure pair card is visible when idle/unpaired
-      codeSection.classList.add('hidden');
       phoneInput.disabled=false;pairBtn.disabled=false;
     }
     if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
@@ -1182,13 +1168,6 @@ app.get('/api/sessions', (req, res) => {
   const list = Object.keys(sessions);
   if (!list.includes('default')) list.unshift('default');
   res.json({ success: true, sessions: list });
-});
-
-app.post('/api/sessions/create', (req, res) => {
-  const { session } = req.body;
-  if(!session) return res.status(400).json({ success: false, error: 'Session name required' });
-  getOrCreateSession(session);
-  res.json({ success: true });
 });
 
 app.post('/api/pair', async (req, res) => {
@@ -1341,7 +1320,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
         const t = line.trim();
         if (t && !seen.has(t)) {
           seen.add(t);
-        messages.push(t);
+          messages.push(t);
         }
       });
     } finally {
@@ -1398,7 +1377,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
   } catch (err) {
-    res.status(500).json({ success: false, error: err.message});
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
@@ -1440,6 +1419,5 @@ app.listen(PORT, HOST, () => {
   console.log('\n🌐 Multi-Session Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
-process.exit = process.exit || (() => {});
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
