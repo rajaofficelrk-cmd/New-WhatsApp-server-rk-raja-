@@ -376,7 +376,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>🎀 9MAN X YAMDHUD — Cute Control Center 💖</title>
+<title>🎀 RK RAJA XWD — Cute Control Center 💖</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Quicksand:wght@400;500;600;700&display=swap" rel="stylesheet">
 <style>
@@ -637,7 +637,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
 <div class="container">
   <div class="brand">
-    <h1>🎀 9MAN X YAMDHUD 💖</h1>
+    <h1>🎀 RK RAJA XWD 💖</h1>
     <p>✨ WhatsApp Cute Control Center ✨</p>
   </div>
 
