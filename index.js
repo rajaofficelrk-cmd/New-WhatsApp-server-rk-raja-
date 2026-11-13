@@ -3,7 +3,8 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
+  Browsers,
+  makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
@@ -224,10 +225,13 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
-      // FIXED: Enhanced Desktop Chrome browser profile to prevent pairing mismatch & block
+      // FIXED: Strictly matched standard Mac/Chrome desktop multi-device configuration to eliminate "Couldn't link device" error
       this.sock = makeWASocket({
         version,
-        auth: state,
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+        },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
         browser: Browsers.macOS('Desktop'),
@@ -236,6 +240,7 @@ class WhatsAppSession {
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 15000,
+        retryRequestDelayMs: 2500,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -263,16 +268,17 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
 
+        // FIXED: Request pairing code instantly and safely without throwing reject error
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            // FIXED: Extended delay to 8 seconds for secure WebSocket handshake stabilization
-            await new Promise((r) => setTimeout(r, 8000));
-            this.pairingCode = await this.sock.requestPairingCode(phone);
-            this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
+            await new Promise((r) => setTimeout(r, 4000));
+            const formattedPhone = phone.replace(/[^0-9]/g, '');
+            this.pairingCode = await this.sock.requestPairingCode(formattedPhone);
+            this.pushLog('info', `Pairing code successfully generated for ${formattedPhone}: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
-            this.pushLog('err', 'Pairing code error: ' + err.message);
+            this.pushLog('err', 'Pairing code generation error: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -1262,7 +1268,7 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Connection in progress' });
     }
     
-    // FIXED: Clean up old auth folder completely before generating a fresh handshake code
+    // Completely wipe old corrupted auth files to guarantee fresh pairing token generation
     if (fs.existsSync(sess.authDir)) {
       try {
         fs.rmSync(sess.authDir, { recursive: true, force: true });
@@ -1453,7 +1459,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const waitMs = delaySec * 1000;
 
     const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
-    const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
+    const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() + ' ' : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
     sess.bulkState.running = true;
