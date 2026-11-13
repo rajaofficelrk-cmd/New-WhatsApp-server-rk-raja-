@@ -224,16 +224,18 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
+      // FIXED: Enhanced Desktop Chrome browser profile to prevent pairing mismatch & block
       this.sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
         markOnlineOnConnect: true,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
+        keepAliveIntervalMs: 15000,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -264,7 +266,8 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            await new Promise((r) => setTimeout(r, 6000));
+            // FIXED: Extended delay to 8 seconds for secure WebSocket handshake stabilization
+            await new Promise((r) => setTimeout(r, 8000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
             this.lastError = null;
@@ -308,7 +311,7 @@ class WhatsAppSession {
 
           if (shouldReconnect && this.currentPhone) {
             this.pairingRequested = false;
-            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
+            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 4000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -638,7 +641,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div id="errBox" class="msg err hidden"></div>
     </div>
 
-    <!-- FIXED: Always visible directly without hiding bugs -->
     <div class="card" id="pairCard">
       <h2><span class="dot"></span>Pair WhatsApp</h2>
       <label>Phone Number (country code, no + or spaces)</label>
@@ -1128,7 +1130,6 @@ async function pollStatus(){
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
     
-    // FIXED: Always ensure pairCard is displayed cleanly
     pairCard.classList.remove('hidden');
 
     if(d.paired){
@@ -1260,7 +1261,13 @@ app.post('/api/pair', async (req, res) => {
     if (sess.isConnecting) {
       return res.status(400).json({ success: false, error: 'Connection in progress' });
     }
-    if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
+    
+    // FIXED: Clean up old auth folder completely before generating a fresh handshake code
+    if (fs.existsSync(sess.authDir)) {
+      try {
+        fs.rmSync(sess.authDir, { recursive: true, force: true });
+      } catch (e) {}
+    }
 
     sess.connect(phone).catch((e) => {
       sess.lastError = e.message;
@@ -1486,7 +1493,6 @@ app.post('/api/bulk/stop', (req, res) => {
   }
 
   const sess = getOrCreateSession(session);
-  if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
   sess.bulkState.stopFlag = true;
   sess.bulkState.running = false;
   sess.pushLog('warn', 'Emergency stop signal received from authorized user');
@@ -1519,7 +1525,7 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Final Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🌐 Ultimate Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.exit = process.exit || (() => {});
