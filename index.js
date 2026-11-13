@@ -3,6 +3,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
@@ -96,7 +97,6 @@ function isSocketReady() {
   return !!(sock && isPaired);
 }
 
-// Parse .txt → messages queue
 function parseMessagesFile(filePath) {
   const content = fs.readFileSync(filePath, 'utf8');
   const seen = new Set();
@@ -111,7 +111,6 @@ function parseMessagesFile(filePath) {
   return out;
 }
 
-// ===== Safe send with retry =====
 async function safeSend(jid, text) {
   let lastErr = null;
   for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
@@ -130,7 +129,6 @@ async function safeSend(jid, text) {
   return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
 }
 
-// ===== The powerful continuous loop =====
 async function runWorker() {
   if (bulkState.workerAlive) return;
   bulkState.workerAlive = true;
@@ -138,7 +136,6 @@ async function runWorker() {
 
   try {
     while (!bulkState.stopFlag) {
-      // If socket temporarily down, wait and continue
       if (!isSocketReady()) {
         bulkState.lastBeat = Date.now();
         await sleep(3000);
@@ -156,7 +153,6 @@ async function runWorker() {
           bulkState.currentTarget = t.label;
           bulkState.lastBeat = Date.now();
 
-          // If socket dropped, break inner and outer will re-wait
           if (!isSocketReady()) {
             pushLog('warn', 'Socket temporarily unavailable — waiting to resume');
             break;
@@ -183,7 +179,6 @@ async function runWorker() {
           }
         }
 
-        // if socket broke mid-message, don't advance to next message yet
         if (!isSocketReady() && !bulkState.stopFlag) break;
       }
 
@@ -197,7 +192,6 @@ async function runWorker() {
     }
   } catch (loopErr) {
     pushLog('err', 'Worker crashed: ' + loopErr.message);
-    // Auto-restart worker unless user pressed stop
     if (!bulkState.stopFlag) {
       pushLog('warn', 'Worker auto-restarting in 3s...');
       bulkState.workerAlive = false;
@@ -219,7 +213,6 @@ async function runWorker() {
   }
 }
 
-// ===== Watchdog: ensure worker alive if running =====
 setInterval(() => {
   if (bulkState.running && !bulkState.workerAlive) {
     pushLog('warn', 'Watchdog: worker not alive — restarting');
@@ -227,7 +220,6 @@ setInterval(() => {
   }
 }, WATCHDOG_INTERVAL_MS);
 
-// ===== WhatsApp connection =====
 async function connectToWhatsApp(phone) {
   if (!phone) throw new Error('Phone number required');
   if (isConnecting) throw new Error('Connection already in progress');
@@ -242,14 +234,17 @@ async function connectToWhatsApp(phone) {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
+    // FIXED: Using Browsers.macOS / stable configuration to prevent pairing rejection errors
     sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: ['Ubuntu', 'Chrome', '20.0.04'],
-      mobile: false,
+      browser: Browsers.macOS('Desktop'),
       syncFullHistory: false,
+      markOnlineOnConnect: true,
+      connectTimeoutMs: 60000,
+      defaultQueryTimeoutMs: 60000,
     });
 
     sock.ev.on('creds.update', saveCreds);
@@ -277,10 +272,11 @@ async function connectToWhatsApp(phone) {
     sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect } = update;
 
+      // FIXED: Added stable delay and registration check to eliminate "Couldn't link device" error
       if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
         pairingRequested = true;
         try {
-          await sleep(1000);
+          await sleep(3000); // 3 seconds buffer for stable socket handshake
           pairingCode = await sock.requestPairingCode(phone);
           console.log(`\n📱 PAIRING CODE for ${phone}: ${pairingCode}\n`);
           pushLog('info', `Pairing code for ${phone}: ${pairingCode}`);
@@ -314,7 +310,6 @@ async function connectToWhatsApp(phone) {
           }
         }, 3000);
 
-        // If a bulk task was running before reconnect, make sure worker alive
         if (bulkState.running && !bulkState.workerAlive) {
           pushLog('info', 'Reconnect detected — resuming bulk worker');
           runWorker();
@@ -329,7 +324,6 @@ async function connectToWhatsApp(phone) {
         isPaired = false;
         isConnecting = false;
 
-        // Do NOT kill bulk worker — it will wait for socket to come back
         if (bulkState.running) {
           pushLog('warn', 'Socket dropped — worker will auto-resume after reconnect');
         }
@@ -341,7 +335,6 @@ async function connectToWhatsApp(phone) {
           pairingCode = null;
           pairingRequested = false;
           currentPhone = null;
-          // logged out → hard stop worker
           if (bulkState.running) {
             bulkState.stopFlag = true;
             pushLog('warn', 'Logged out — stopping bulk worker');
@@ -356,15 +349,12 @@ async function connectToWhatsApp(phone) {
   }
 }
 
-// ============================================================
-// EMBEDDED HTML (UI preserved)
-// ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD  — Control Center</title>
+<title>RK RAJA XWD — Control Center</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
@@ -1054,9 +1044,6 @@ pollStats();
 </body>
 </html>`;
 
-// ============================================================
-// Express app
-// ============================================================
 const app = express();
 app.use(express.json());
 
@@ -1181,7 +1168,6 @@ app.post('/api/send-groups', async (req, res) => {
 
 app.post('/api/logout', async (req, res) => {
   try {
-    // Force stop worker first
     if (bulkState.running) {
       bulkState.stopFlag = true;
       pushLog('warn', 'Logout — stopping worker');
@@ -1199,9 +1185,6 @@ app.post('/api/logout', async (req, res) => {
   }
 });
 
-// ============================================================
-// BULK START — messages queue × targets, continuous 24/7 loop
-// ============================================================
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
     if (!isPaired || !sock) {
@@ -1218,7 +1201,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 
     const { hater, delay, lastHater, groupIds } = req.body;
 
-    // Load messages into memory NOW (file gets deleted after)
     let messages = [];
     try {
       messages = parseMessagesFile(req.file.path);
@@ -1230,7 +1212,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, error: 'No valid messages found (all empty/duplicate)' });
     }
 
-    // Targets
     const targets = [];
     const seen = new Set();
     let parsedGroups = [];
@@ -1243,17 +1224,14 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
       return res.status(400).json({ success: false, error: 'No targets — select at least one group' });
     }
 
-    // Enforce delay
     let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS;
     if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
     const waitMs = delaySec * 1000;
 
-    // Apply prefix/suffix
     const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
     const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
-    // Reset state
     bulkState.running = true;
     bulkState.stopFlag = false;
     bulkState.sent = 0;
@@ -1277,7 +1255,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     pushLog('info', `Task #${bulkState.tasks} started — ${messages.length} messages × ${targets.length} targets, delay ${delaySec}s`);
     pushLog('info', 'Loop mode: 24/7 continuous. Press Emergency Stop to halt.');
 
-    // Launch worker (non-blocking)
     runWorker();
 
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
