@@ -259,7 +259,14 @@ async function connectSession(sessionId, phone) {
 
   try {
     const { state, saveCreds } = await useMultiFileAuthState(s.authDir);
-    const { version } = await fetchLatestBaileysVersion();
+    
+    let version;
+    try {
+      const v = await fetchLatestBaileysVersion();
+      version = v.version;
+    } catch (e) {
+      version = [2, 3000, 1015901307]; // Fallback if fetch fails
+    }
 
     s.sock = makeWASocket({
       version,
@@ -662,22 +669,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       </div>
       <button id="pairBtn" onclick="startPair()">🔗 Get Pairing Code</button>
       
-      <!-- CODE YAHAN NICHE DIKHEGA -->
-      <div id="codeDisplayArea" class="hidden" style="margin-top: 18px;">
-        <div class="pair-code-box">
-          <div class="code-label">✨ Aapka Pairing Code ✨</div>
+      <div id="pairMsg" class="msg"></div>
+
+      <!-- LIVE PAIRING DASHBOARD -->
+      <div id="livePairDashboard" class="hidden" style="margin-top: 20px; padding: 20px; background: rgba(255,255,255,0.9); border: 2px dashed #ff6b9d; border-radius: 16px; text-align: center;">
+        <h3 style="color: #7c3aed; font-size: 14px; margin-bottom: 10px;">📡 LIVE PAIRING DASHBOARD</h3>
+        <div id="liveStatus" style="font-size: 13px; color: #6b7280; margin-bottom: 15px; font-weight: 600;">Connecting to WhatsApp servers...</div>
+        
+        <div id="liveCodeBox" class="pair-code-box hidden">
+          <div class="code-label">✨ Your Pairing Code ✨</div>
           <div class="code-value" id="displayCode">------</div>
         </div>
-        <div class="steps-cute" style="margin-top: 12px;">
-          <b>Steps:</b><br>
-          1. WhatsApp kholiye 📱<br>
-          2. <b>Linked Devices</b> par jayein<br>
-          3. <b>Link a Device</b> → <b>Link with phone number</b><br>
-          4. Upar wala code enter karein 💕
-        </div>
+        
+        <div id="liveErrorBox" class="msg err hidden" style="margin-top: 10px;"></div>
       </div>
-      
-      <div id="pairMsg" class="msg"></div>
+
     </div>
 
     <div class="card">
@@ -841,6 +847,7 @@ var lastSessionsJson='';
 async function loadSessions(){
   try{
     var res=await fetch('/api/sessions');
+    if(!res.ok) throw new Error('Server error: '+res.status);
     var d=await res.json();
     var json=JSON.stringify(d.sessions);
     if(json===lastSessionsJson) return;
@@ -848,7 +855,10 @@ async function loadSessions(){
     currentSessions=d.sessions||[];
     renderSessions();
     updateSessionDropdowns();
-  }catch(e){console.error(e);}
+  }catch(e){
+    console.error(e);
+    document.getElementById('sessionsList').innerHTML='<div class="empty" style="color:#dc2626">Server connecting... (Refresh page if stuck)</div>';
+  }
 }
 
 function renderSessions(){
@@ -907,8 +917,11 @@ async function startPair(){
   var phone = document.getElementById('phoneInput').value.trim();
   var btn = document.getElementById('pairBtn');
   var msgEl = document.getElementById('pairMsg');
-  var codeArea = document.getElementById('codeDisplayArea');
+  var dash = document.getElementById('livePairDashboard');
+  var statusEl = document.getElementById('liveStatus');
+  var codeBox = document.getElementById('liveCodeBox');
   var codeVal = document.getElementById('displayCode');
+  var errBox = document.getElementById('liveErrorBox');
 
   if(!phone || !/^\\d{10,15}$/.test(phone)) {
     showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath)');
@@ -918,8 +931,11 @@ async function startPair(){
   btn.disabled = true; 
   btn.textContent = 'Generating Code...';
   showMsg(msgEl, '', '');
-  codeArea.classList.add('hidden');
-  codeVal.textContent = '------';
+  dash.classList.remove('hidden');
+  codeBox.classList.add('hidden');
+  errBox.classList.add('hidden');
+  statusEl.textContent = 'Requesting code from WhatsApp...';
+  statusEl.style.color = '#a78bfa';
   
   try {
     var res = await fetch('/api/pair-new', {
@@ -931,19 +947,13 @@ async function startPair(){
     
     if(!d.success) throw new Error(d.error||'Failed');
     
-    // Code box shows immediately with loading state
-    codeArea.classList.remove('hidden');
-    codeVal.textContent = 'WAIT...';
-    showMsg(msgEl, 'ok', 'Code generate ho raha hai, wait karein...');
-
-    // Poll for code directly in the box
     let attempts = 0;
     let interval = setInterval(async () => {
       attempts++;
-      if(attempts > 30) { // 30 seconds timeout
+      if(attempts > 40) { // 40 seconds timeout
         clearInterval(interval);
-        codeVal.textContent = 'TIMEOUT';
-        showMsg(msgEl, 'err', 'Code generate nahi hua. Number ya network check karein.');
+        statusEl.textContent = 'Timed out. Please try again.';
+        statusEl.style.color = '#dc2626';
         btn.disabled = false;
         btn.textContent = '🔗 Get Pairing Code';
         return;
@@ -951,36 +961,53 @@ async function startPair(){
       
       try {
         var sRes = await fetch('/api/sessions');
+        if (!sRes.ok) throw new Error('Server not responding');
         var sData = await sRes.json();
         var mySession = sData.sessions.find(s => s.id === d.id);
         
-        if (mySession && mySession.code) {
+        if (!mySession) return; // wait
+
+        if (mySession.error) {
           clearInterval(interval);
+          statusEl.textContent = 'Failed to generate code.';
+          statusEl.style.color = '#dc2626';
+          errBox.textContent = mySession.error;
+          errBox.classList.remove('hidden');
+          btn.disabled = false;
+          btn.textContent = '🔗 Get Pairing Code';
+        } else if (mySession.code) {
+          clearInterval(interval);
+          statusEl.textContent = 'Code generated! Enter this in WhatsApp.';
+          statusEl.style.color = '#16a34a';
+          codeBox.classList.remove('hidden');
           codeVal.textContent = mySession.code;
-          showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
           btn.disabled = false;
           btn.textContent = '🔗 Get Pairing Code';
-        } else if (mySession && mySession.paired) {
-          clearInterval(interval);
-          codeArea.classList.add('hidden');
-          showMsg(msgEl, 'ok', 'Successfully Linked! 🎉');
-          btn.disabled = false;
-          btn.textContent = '🔗 Get Pairing Code';
-          lastSessionsJson = ''; // Force refresh sessions list
+          lastSessionsJson = ''; 
           loadSessions();
-        } else if (mySession && mySession.error) {
+        } else if (mySession.paired) {
           clearInterval(interval);
-          showMsg(msgEl, 'err', mySession.error);
+          statusEl.textContent = 'Successfully Linked! 🎉';
+          statusEl.style.color = '#16a34a';
+          codeBox.classList.add('hidden');
           btn.disabled = false;
           btn.textContent = '🔗 Get Pairing Code';
+          lastSessionsJson = ''; 
+          loadSessions();
+        } else if (mySession.connecting) {
+          statusEl.textContent = 'Waiting for WhatsApp to respond...';
         }
       } catch (err) {
         console.error(err);
+        statusEl.textContent = 'Checking status... (network lag)';
       }
     }, 1000);
 
   } catch(e) {
-    showMsg(msgEl, 'err', '❌ ' + e.message);
+    statusEl.textContent = 'Request failed.';
+    statusEl.style.color = '#dc2626';
+    errBox.textContent = e.message;
+    errBox.classList.remove('hidden');
     btn.disabled = false;
     btn.textContent = '🔗 Get Pairing Code';
   }
