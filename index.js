@@ -8,18 +8,11 @@ const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
 const fs = require('fs');
-const path = require('path');
 const multer = require('multer');
 
 const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
-const SESSIONS_BASE_DIR = 'sessions_data';
-
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'raja123';
-
-if (!fs.existsSync(SESSIONS_BASE_DIR)) {
-  fs.mkdirSync(SESSIONS_BASE_DIR, { recursive: true });
-}
+const AUTH_DIR = 'auth_info_baileys';
 
 const MIN_DELAY_SECONDS = 3;
 const DEFAULT_DELAY_SECONDS = 10;
@@ -27,8 +20,48 @@ const SEND_RETRY = 1;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 30000;
 
-const sessions = {};
+let sock = null;
+let pairingCode = null;
+let isPaired = false;
+let currentPhone = null;
+let pairingRequested = false;
+let isConnecting = false;
+let lastError = null;
+let connectedAt = null;
 let serverStartTime = Date.now();
+
+let groupsCache = {};
+
+const bulkState = {
+  running: false,
+  stopFlag: false,
+  sent: 0,
+  failed: 0,
+  tasks: 0,
+  total: 0,
+  remaining: 0,
+  cycle: 0,
+  msgIndex: 0,
+  targetIndex: 0,
+  totalTargets: 0,
+  currentMessage: '',
+  currentTarget: '',
+  targets: [],
+  messages: [],
+  delayMs: DEFAULT_DELAY_SECONDS * 1000,
+  logs: [],
+  logId: 0,
+  startedAt: null,
+  workerAlive: false,
+  lastBeat: 0,
+};
+
+function pushLog(type, msg) {
+  bulkState.logs.push({ id: ++bulkState.logId, ts: Date.now(), type, msg });
+  if (bulkState.logs.length > 500) bulkState.logs.splice(0, bulkState.logs.length - 500);
+  const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
+  console.log(`${icons[type] || '•'} ${msg}`);
+}
 
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
@@ -38,352 +71,300 @@ function formatUptime(ms) {
   return `${h}:${m}:${sec}`;
 }
 
-class WhatsAppSession {
-  constructor(name) {
-    this.name = name;
-    this.authDir = path.join(SESSIONS_BASE_DIR, name);
-    this.sock = null;
-    this.pairingCode = null;
-    this.isPaired = false;
-    this.currentPhone = null;
-    this.pairingRequested = false;
-    this.isConnecting = false;
-    this.lastError = null;
-    this.connectedAt = null;
-    this.groupsCache = {};
-
-    this.bulkState = {
-      running: false,
-      stopFlag: false,
-      sent: 0,
-      failed: 0,
-      tasks: 0,
-      total: 0,
-      remaining: 0,
-      cycle: 0,
-      msgIndex: 0,
-      targetIndex: 0,
-      totalTargets: 0,
-      currentMessage: '',
-      currentTarget: '',
-      targets: [],
-      messages: [],
-      delayMs: DEFAULT_DELAY_SECONDS * 1000,
-      logs: [],
-      logId: 0,
-      startedAt: null,
-      workerAlive: false,
-      lastBeat: 0,
-    };
-  }
-
-  pushLog(type, msg) {
-    this.bulkState.logs.push({ id: ++this.bulkState.logId, ts: Date.now(), type, msg });
-    if (this.bulkState.logs.length > 500) this.bulkState.logs.splice(0, this.bulkState.logs.length - 500);
-    const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
-    console.log(`[${this.name}] ${icons[type] || '•'} ${msg}`);
-  }
-
-  isSocketReady() {
-    return !!(this.sock && this.isPaired);
-  }
-
-  getGroupsFromStore() {
-    const out = [];
-    try {
-      if (this.sock && this.sock.store && this.sock.store.groupMetadata) {
-        const map = this.sock.store.groupMetadata;
-        map.forEach((v) => {
-          out.push({
-            id: v.id,
-            name: v.subject || '',
-            size: v.participants ? v.participants.length : 0,
-          });
+function getGroupsFromStore() {
+  const out = [];
+  try {
+    if (sock && sock.store && sock.store.groupMetadata) {
+      const map = sock.store.groupMetadata;
+      map.forEach((v) => {
+        out.push({
+          id: v.id,
+          name: v.subject || '',
+          size: v.participants ? v.participants.length : 0,
         });
-      }
-    } catch (_) {}
-    return out;
-  }
-
-  async safeSend(jid, text) {
-    let lastErr = null;
-    for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
-      try {
-        if (!this.isSocketReady()) throw new Error('socket not ready');
-        await this.sock.sendMessage(jid, { text });
-        return { ok: true };
-      } catch (e) {
-        lastErr = e;
-        if (attempt < SEND_RETRY) {
-          this.pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
-          await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
-        }
-      }
+      });
     }
-    return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
-  }
+  } catch (_) {}
+  return out;
+}
 
-  async runWorker() {
-    if (this.bulkState.workerAlive) return;
-    this.bulkState.workerAlive = true;
-    this.pushLog('info', 'Worker started — loop active');
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
+}
 
+function isSocketReady() {
+  return !!(sock && isPaired);
+}
+
+// Parse .txt → messages queue
+function parseMessagesFile(filePath) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const seen = new Set();
+  const out = [];
+  content.split(/\r?\n/).forEach((line) => {
+    const t = line.trim();
+    if (!t) return;
+    if (seen.has(t)) return;
+    seen.add(t);
+    out.push(t);
+  });
+  return out;
+}
+
+// ===== Safe send with retry =====
+async function safeSend(jid, text) {
+  let lastErr = null;
+  for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
     try {
-      while (!this.bulkState.stopFlag) {
-        if (!this.isSocketReady()) {
-          this.bulkState.lastBeat = Date.now();
-          await new Promise((r) => setTimeout(r, 3000));
-          continue;
-        }
-
-        for (let mi = 0; mi < this.bulkState.messages.length && !this.bulkState.stopFlag; mi++) {
-          const msg = this.bulkState.messages[mi];
-          this.bulkState.msgIndex = mi;
-          this.bulkState.currentMessage = msg;
-
-          for (let ti = 0; ti < this.bulkState.targets.length && !this.bulkState.stopFlag; ti++) {
-            const t = this.bulkState.targets[ti];
-            this.bulkState.targetIndex = ti;
-            this.bulkState.currentTarget = t.label;
-            this.bulkState.lastBeat = Date.now();
-
-            if (!this.isSocketReady()) {
-              this.pushLog('warn', 'Socket temporarily unavailable — waiting to resume');
-              break;
-            }
-
-            try {
-              const res = await this.safeSend(t.jid, msg);
-              if (res.ok) {
-                this.bulkState.sent++;
-                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → ${t.label}`);
-              } else {
-                this.bulkState.failed++;
-                this.pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
-              }
-            } catch (e) {
-              this.bulkState.failed++;
-              this.pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
-            }
-
-            this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
-
-            if (!this.bulkState.stopFlag) {
-              await new Promise((r) => setTimeout(r, this.bulkState.delayMs));
-            }
-          }
-
-          if (!this.isSocketReady() && !this.bulkState.stopFlag) break;
-        }
-
-        if (!this.bulkState.stopFlag) {
-          this.bulkState.cycle++;
-          this.bulkState.remaining = this.bulkState.messages.length;
-          this.bulkState.msgIndex = 0;
-          this.bulkState.targetIndex = 0;
-          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed — restarting from Message 1`);
-        }
-      }
-    } catch (loopErr) {
-      this.pushLog('err', 'Worker crashed: ' + loopErr.message);
-      if (!this.bulkState.stopFlag) {
-        this.pushLog('warn', 'Worker auto-restarting in 3s...');
-        this.bulkState.workerAlive = false;
-        this.bulkState.running = true;
-        setTimeout(() => { this.runWorker(); }, 3000);
-        return;
-      }
-    } finally {
-      if (this.bulkState.stopFlag) {
-        this.bulkState.running = false;
-        this.bulkState.stopFlag = false;
-        this.bulkState.workerAlive = false;
-        this.bulkState.currentMessage = '';
-        this.bulkState.currentTarget = '';
-        this.pushLog('info', `Task stopped — Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}, Cycles: ${this.bulkState.cycle}`);
-      } else {
-        this.bulkState.workerAlive = false;
+      if (!isSocketReady()) throw new Error('socket not ready');
+      await sock.sendMessage(jid, { text });
+      return { ok: true };
+    } catch (e) {
+      lastErr = e;
+      if (attempt < SEND_RETRY) {
+        pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
+        await sleep(RETRY_WAIT_MS);
       }
     }
   }
+  return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
+}
 
-  async connect(phone) {
-    if (!phone) throw new Error('Phone number required');
-    if (this.isConnecting) throw new Error('Connection already in progress');
-    if (this.isPaired) throw new Error('Already paired');
+// ===== The powerful continuous loop =====
+async function runWorker() {
+  if (bulkState.workerAlive) return;
+  bulkState.workerAlive = true;
+  pushLog('info', 'Worker started — 24/7 loop active');
 
-    this.isConnecting = true;
-    this.currentPhone = phone;
-    this.pairingCode = null;
-    this.lastError = null;
+  try {
+    while (!bulkState.stopFlag) {
+      // If socket temporarily down, wait and continue
+      if (!isSocketReady()) {
+        bulkState.lastBeat = Date.now();
+        await sleep(3000);
+        continue;
+      }
 
-    try {
-      const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestBaileysVersion();
+      for (let mi = 0; mi < bulkState.messages.length && !bulkState.stopFlag; mi++) {
+        const msg = bulkState.messages[mi];
+        bulkState.msgIndex = mi;
+        bulkState.currentMessage = msg;
 
-      // FIXED: Added proper mobile pairing socket configuration to bypass "Couldn't link device" error
-      this.sock = makeWASocket({
-        version,
-        auth: state,
-        printQRInTerminal: false,
-        logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
-        mobile: false,
-        syncFullHistory: false,
-        markOnlineOnConnect: true,
-      });
+        for (let ti = 0; ti < bulkState.targets.length && !bulkState.stopFlag; ti++) {
+          const t = bulkState.targets[ti];
+          bulkState.targetIndex = ti;
+          bulkState.currentTarget = t.label;
+          bulkState.lastBeat = Date.now();
 
-      this.sock.ev.on('creds.update', saveCreds);
-
-      this.sock.ev.on('groups.upsert', (groups) => {
-        groups.forEach((g) => {
-          this.groupsCache[g.id] = {
-            id: g.id,
-            name: g.subject || '',
-            size: g.participants ? g.participants.length : 0,
-          };
-        });
-      });
-
-      this.sock.ev.on('groups.update', (updates) => {
-        updates.forEach((u) => {
-          if (this.groupsCache[u.id]) {
-            if (u.subject) this.groupsCache[u.id].name = u.subject;
-          } else if (u.id) {
-            this.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
+          // If socket dropped, break inner and outer will re-wait
+          if (!isSocketReady()) {
+            pushLog('warn', 'Socket temporarily unavailable — waiting to resume');
+            break;
           }
-        });
-      });
 
-      this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
-          this.pairingRequested = true;
           try {
-            // Wait 4 seconds for complete socket registration before requesting pairing code
-            await new Promise((r) => setTimeout(r, 4000));
-            this.pairingCode = await this.sock.requestPairingCode(phone);
-            this.pushLog('info', `Pairing code for ${phone}: ${this.pairingCode}`);
-            this.lastError = null;
-          } catch (err) {
-            this.pushLog('err', 'Pairing code error: ' + err.message);
-            this.lastError = err.message;
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.isConnecting = false;
-          }
-        }
-
-        if (connection === 'open') {
-          this.isPaired = true;
-          this.pairingCode = null;
-          this.pairingRequested = false;
-          this.isConnecting = false;
-          this.connectedAt = new Date().toISOString();
-          this.lastError = null;
-          this.pushLog('ok', `WhatsApp connected (${phone})`);
-
-          setTimeout(() => {
-            try {
-              const groups = this.getGroupsFromStore();
-              groups.forEach((g) => { this.groupsCache[g.id] = g; });
-              this.pushLog('info', `Loaded ${groups.length} groups into cache`);
-            } catch (e) {}
-          }, 3000);
-
-          if (this.bulkState.running && !this.bulkState.workerAlive) {
-            this.pushLog('info', 'Reconnect detected — resuming bulk worker');
-            this.runWorker();
-          }
-        }
-
-        if (connection === 'close') {
-          const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-          const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-          this.pushLog('warn', `Connection closed (code ${statusCode})`);
-
-          this.isPaired = false;
-          this.isConnecting = false;
-
-          if (shouldReconnect && this.currentPhone) {
-            this.pairingRequested = false;
-            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
-          } else if (statusCode === DisconnectReason.loggedOut) {
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.currentPhone = null;
-            if (this.bulkState.running) {
-              this.bulkState.stopFlag = true;
-              this.pushLog('warn', 'Logged out — stopping bulk worker');
+            const res = await safeSend(t.jid, msg);
+            if (res.ok) {
+              bulkState.sent++;
+              pushLog('ok', `Cycle ${bulkState.cycle + 1} | Msg ${mi + 1}/${bulkState.messages.length} → ${t.label}`);
+            } else {
+              bulkState.failed++;
+              pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
             }
+          } catch (e) {
+            bulkState.failed++;
+            pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
+          }
+
+          bulkState.remaining = bulkState.messages.length - (mi + 1);
+
+          if (!bulkState.stopFlag) {
+            await sleep(bulkState.delayMs);
           }
         }
-      });
-    } catch (err) {
-      this.isConnecting = false;
-      this.lastError = err.message;
-      throw err;
-    }
-  }
 
-  async logout() {
-    if (this.bulkState.running) {
-      this.bulkState.stopFlag = true;
-      this.pushLog('warn', 'Logout — stopping worker');
+        // if socket broke mid-message, don't advance to next message yet
+        if (!isSocketReady() && !bulkState.stopFlag) break;
+      }
+
+      if (!bulkState.stopFlag) {
+        bulkState.cycle++;
+        bulkState.remaining = bulkState.messages.length;
+        bulkState.msgIndex = 0;
+        bulkState.targetIndex = 0;
+        pushLog('info', `Cycle ${bulkState.cycle} completed — restarting from Message 1`);
+      }
     }
-    if (this.sock) { try { await this.sock.logout(); } catch (_) {} }
-    if (fs.existsSync(this.authDir)) fs.rmSync(this.authDir, { recursive: true, force: true });
-    this.isPaired = false;
-    this.pairingCode = null;
-    this.currentPhone = null;
-    this.pairingRequested = false;
-    this.isConnecting = false;
-    this.connectedAt = null;
-    this.lastError = null;
-    this.sock = null;
-    this.groupsCache = {};
-    this.pushLog('warn', 'Logged out, auth cleared');
+  } catch (loopErr) {
+    pushLog('err', 'Worker crashed: ' + loopErr.message);
+    // Auto-restart worker unless user pressed stop
+    if (!bulkState.stopFlag) {
+      pushLog('warn', 'Worker auto-restarting in 3s...');
+      bulkState.workerAlive = false;
+      bulkState.running = true;
+      setTimeout(() => { runWorker(); }, 3000);
+      return;
+    }
+  } finally {
+    if (bulkState.stopFlag) {
+      bulkState.running = false;
+      bulkState.stopFlag = false;
+      bulkState.workerAlive = false;
+      bulkState.currentMessage = '';
+      bulkState.currentTarget = '';
+      pushLog('info', `Task stopped — Sent: ${bulkState.sent}, Failed: ${bulkState.failed}, Cycles: ${bulkState.cycle}`);
+    } else {
+      bulkState.workerAlive = false;
+    }
   }
 }
 
+// ===== Watchdog: ensure worker alive if running =====
 setInterval(() => {
-  Object.values(sessions).forEach((sess) => {
-    if (sess.bulkState.running && !sess.bulkState.workerAlive) {
-      sess.pushLog('warn', 'Watchdog: worker not alive — restarting');
-      sess.runWorker();
-    }
-  });
+  if (bulkState.running && !bulkState.workerAlive) {
+    pushLog('warn', 'Watchdog: worker not alive — restarting');
+    runWorker();
+  }
 }, WATCHDOG_INTERVAL_MS);
 
-function getOrCreateSession(name) {
-  const cleanName = (name || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  if (!sessions[cleanName]) {
-    sessions[cleanName] = new WhatsAppSession(cleanName);
-  }
-  return sessions[cleanName];
-}
+// ===== WhatsApp connection =====
+async function connectToWhatsApp(phone) {
+  if (!phone) throw new Error('Phone number required');
+  if (isConnecting) throw new Error('Connection already in progress');
+  if (isPaired) throw new Error('Already paired');
 
-if (fs.existsSync(SESSIONS_BASE_DIR)) {
-  fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
-    if (dirent.isDirectory()) {
-      getOrCreateSession(dirent.name);
-    }
-  });
-}
-if (Object.keys(sessions).length === 0) {
-  getOrCreateSession('default');
+  isConnecting = true;
+  currentPhone = phone;
+  pairingCode = null;
+  lastError = null;
+
+  try {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+    const { version } = await fetchLatestBaileysVersion();
+
+    sock = makeWASocket({
+      version,
+      auth: state,
+      printQRInTerminal: false,
+      logger: pino({ level: 'silent' }),
+      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      mobile: false,
+      syncFullHistory: false,
+    });
+
+    sock.ev.on('creds.update', saveCreds);
+
+    sock.ev.on('groups.upsert', (groups) => {
+      groups.forEach((g) => {
+        groupsCache[g.id] = {
+          id: g.id,
+          name: g.subject || '',
+          size: g.participants ? g.participants.length : 0,
+        };
+      });
+    });
+
+    sock.ev.on('groups.update', (updates) => {
+      updates.forEach((u) => {
+        if (groupsCache[u.id]) {
+          if (u.subject) groupsCache[u.id].name = u.subject;
+        } else if (u.id) {
+          groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
+        }
+      });
+    });
+
+    sock.ev.on('connection.update', async (update) => {
+      const { connection, lastDisconnect } = update;
+
+      if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
+        pairingRequested = true;
+        try {
+          await sleep(1000);
+          pairingCode = await sock.requestPairingCode(phone);
+          console.log(`\n📱 PAIRING CODE for ${phone}: ${pairingCode}\n`);
+          pushLog('info', `Pairing code for ${phone}: ${pairingCode}`);
+          lastError = null;
+        } catch (err) {
+          console.error('❌ Pairing code error:', err.message);
+          lastError = err.message;
+          pairingCode = null;
+          pairingRequested = false;
+          isConnecting = false;
+        }
+      }
+
+      if (connection === 'open') {
+        console.log('✅ WhatsApp connected!');
+        isPaired = true;
+        pairingCode = null;
+        pairingRequested = false;
+        isConnecting = false;
+        connectedAt = new Date().toISOString();
+        lastError = null;
+        pushLog('ok', `WhatsApp connected (${phone})`);
+
+        setTimeout(() => {
+          try {
+            const groups = getGroupsFromStore();
+            groups.forEach((g) => { groupsCache[g.id] = g; });
+            pushLog('info', `Loaded ${groups.length} groups into cache`);
+          } catch (e) {
+            console.error('Group cache load error:', e.message);
+          }
+        }, 3000);
+
+        // If a bulk task was running before reconnect, make sure worker alive
+        if (bulkState.running && !bulkState.workerAlive) {
+          pushLog('info', 'Reconnect detected — resuming bulk worker');
+          runWorker();
+        }
+      }
+
+      if (connection === 'close') {
+        const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+        const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
+        pushLog('warn', `Connection closed (code ${statusCode})`);
+
+        isPaired = false;
+        isConnecting = false;
+
+        // Do NOT kill bulk worker — it will wait for socket to come back
+        if (bulkState.running) {
+          pushLog('warn', 'Socket dropped — worker will auto-resume after reconnect');
+        }
+
+        if (shouldReconnect && currentPhone) {
+          pairingRequested = false;
+          setTimeout(() => connectToWhatsApp(currentPhone).catch(console.error), 3000);
+        } else if (statusCode === DisconnectReason.loggedOut) {
+          pairingCode = null;
+          pairingRequested = false;
+          currentPhone = null;
+          // logged out → hard stop worker
+          if (bulkState.running) {
+            bulkState.stopFlag = true;
+            pushLog('warn', 'Logged out — stopping bulk worker');
+          }
+        }
+      }
+    });
+  } catch (err) {
+    isConnecting = false;
+    lastError = err.message;
+    throw err;
+  }
 }
 
 // ============================================================
-// DASHBOARD HTML (UI)
+// EMBEDDED HTML (UI preserved)
 // ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>9AMAN X YAMDHUD — Secure Control Center</title>
+<title>RK RAJA XWD  — Control Center</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
@@ -398,7 +379,28 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       radial-gradient(900px 600px at 85% 90%, rgba(255,0,60,.14), transparent 65%),
       linear-gradient(135deg,#050507 0%,#0b0b12 55%,#050507 100%);
   }
+  body::after{
+    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
+    background-image:
+      linear-gradient(115deg, transparent 40%, rgba(255,0,60,.06) 41%, transparent 42%),
+      linear-gradient(115deg, transparent 60%, rgba(255,0,60,.05) 61%, transparent 62%),
+      repeating-linear-gradient(115deg, rgba(255,255,255,.015) 0 1px, transparent 1px 60px);
+    mask-image:radial-gradient(circle at 50% 40%, #000 30%, transparent 90%);
+  }
+  .streaks{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+  .streaks span{
+    position:absolute;height:1px;width:220px;left:-30%;
+    background:linear-gradient(90deg,transparent,#ff003c,transparent);
+    filter:drop-shadow(0 0 6px #ff003c);opacity:.55;
+    animation:streak 7s linear infinite;
+  }
+  .streaks span:nth-child(2){top:25%;animation-delay:1.5s;animation-duration:9s}
+  .streaks span:nth-child(3){top:55%;animation-delay:3s;animation-duration:8s}
+  .streaks span:nth-child(4){top:78%;animation-delay:4.5s;animation-duration:10s}
+  @keyframes streak{from{transform:translateX(0) rotate(-12deg)}to{transform:translateX(160vw) rotate(-12deg)}}
+
   .container{max-width:1180px;margin:0 auto;padding:28px 18px 60px;position:relative;z-index:1}
+
   .brand{text-align:center;margin-bottom:26px}
   .brand h1{
     font-size:clamp(22px,4vw,38px);font-weight:900;letter-spacing:3px;
@@ -410,18 +412,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .brand h1 .x{color:#ff003c;-webkit-text-fill-color:#ff003c;text-shadow:0 0 18px #ff003c}
   .brand p{color:#8b8b9c;font-size:11px;letter-spacing:3px;margin-top:6px;text-transform:uppercase}
 
-  #loginOverlay{
-    position:fixed;inset:0;background:#050507;z-index:9999;
-    display:flex;align-items:center;justify-content:center;padding:20px;
-  }
-  .login-card{
-    width:100%;max-width:400px;
-    background:linear-gradient(155deg, rgba(20,20,28,.9), rgba(10,10,15,.95));
-    border:1px solid rgba(255,0,60,.4);border-radius:20px;padding:30px;
-    box-shadow:0 25px 60px rgba(0,0,0,.8),0 0 40px rgba(255,0,60,.15);
-  }
-  .login-card h2{color:#fff;font-size:16px;margin-bottom:20px;text-align:center;letter-spacing:2px;text-transform:uppercase}
-
   .tabs{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;justify-content:center}
   .tab{
     padding:11px 20px;border-radius:12px;font-size:12px;font-weight:700;letter-spacing:2px;
@@ -432,6 +422,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     background:linear-gradient(180deg,#ff0a45,#c40030);color:#fff;border-color:#ff003c;
     box-shadow:0 8px 24px rgba(255,0,60,.35),inset 0 1px 0 rgba(255,255,255,.25);
   }
+  .tab:hover:not(.active){background:rgba(255,0,60,.12)}
+
   .panel{display:none}
   .panel.active{display:block;animation:fade .3s ease}
   @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
@@ -444,7 +436,18 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     background:linear-gradient(155deg, rgba(20,20,28,.72), rgba(10,10,15,.55));
     border:1px solid rgba(255,0,60,.28);
     border-radius:18px;padding:24px;margin-bottom:20px;
-    backdrop-filter:blur(16px);box-shadow:0 20px 50px rgba(0,0,0,.55);
+    backdrop-filter:blur(16px) saturate(140%);
+    -webkit-backdrop-filter:blur(16px) saturate(140%);
+    box-shadow:
+      0 20px 50px rgba(0,0,0,.55),
+      inset 0 1px 0 rgba(255,255,255,.05),
+      0 0 32px rgba(255,0,60,.06);
+  }
+  .card::before{
+    content:"";position:absolute;inset:-1px;border-radius:18px;padding:1px;
+    background:linear-gradient(135deg, rgba(255,0,60,.55), transparent 40%, transparent 60%, rgba(255,0,60,.35));
+    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
+    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;opacity:.7;
   }
   .card h2{
     font-size:13px;margin-bottom:16px;color:#fff;letter-spacing:2px;
@@ -455,21 +458,27 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   label{display:block;font-size:11px;color:#9a9aab;margin-bottom:7px;letter-spacing:1.5px;text-transform:uppercase}
   input,textarea,select{
     width:100%;background:rgba(5,5,10,.75);border:1px solid rgba(255,0,60,.25);
-    border-radius:12px;padding:12px 14px;color:#f1f1f6;font-size:14px;outline:none;transition:.25s;
+    border-radius:12px;padding:12px 14px;color:#f1f1f6;font-size:14px;
+    font-family:inherit;outline:none;transition:.25s;
   }
-  input:focus,textarea:focus,select:focus{border-color:#ff003c;box-shadow:0 0 0 3px rgba(255,0,60,.14)}
+  input:focus,textarea:focus,select:focus{
+    border-color:#ff003c;box-shadow:0 0 0 3px rgba(255,0,60,.14),0 0 22px rgba(255,0,60,.25);
+  }
+  input:disabled{color:#5c5c6d;cursor:not-allowed}
   textarea{resize:vertical;min-height:96px}
   .field{margin-bottom:14px}
 
   button{
     background:linear-gradient(180deg,#ff0a45,#c40030);color:#fff;border:none;
     border-radius:12px;padding:13px 24px;font-size:12px;font-weight:700;
-    letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:.22s;margin-top:6px;width:100%;
-    box-shadow:0 8px 24px rgba(255,0,60,.28);
+    letter-spacing:2px;text-transform:uppercase;cursor:pointer;
+    transition:.22s;margin-top:6px;width:100%;
+    box-shadow:0 8px 24px rgba(255,0,60,.28),inset 0 1px 0 rgba(255,255,255,.25);
   }
   button:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 12px 30px rgba(255,0,60,.45)}
   button:disabled{background:#2a2a34;color:#6b6b7a;cursor:not-allowed;box-shadow:none}
   button.ghost{background:transparent;border:1px solid rgba(255,0,60,.5);color:#ff5277;box-shadow:none}
+  button.ghost:hover:not(:disabled){background:rgba(255,0,60,.1)}
   button.danger{background:linear-gradient(180deg,#ff0040,#a80028);border:1px solid #ff003c}
   .btnrow{display:flex;gap:10px}
   .btnrow button{margin-top:0}
@@ -478,34 +487,46 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .badge{display:inline-block;padding:7px 16px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase}
   .b-idle{background:rgba(120,120,140,.15);color:#a8a8b8;border:1px solid rgba(120,120,140,.35)}
   .b-wait{background:rgba(255,180,0,.12);color:#ffc655;border:1px solid rgba(255,180,0,.4);animation:pulse 1.6s infinite}
-  .b-paired{background:rgba(255,0,60,.14);color:#ff5277;border:1px solid rgba(255,0,60,.55)}
+  .b-paired{background:rgba(255,0,60,.14);color:#ff5277;border:1px solid rgba(255,0,60,.55);box-shadow:0 0 18px rgba(255,0,60,.25)}
+  .b-run{background:rgba(56,239,125,.14);color:#38ef7d;border:1px solid rgba(56,239,125,.55);box-shadow:0 0 18px rgba(56,239,125,.3);animation:pulse 1.6s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 
   .code-box{
     background:rgba(5,5,10,.85);border:2px dashed #ff003c;border-radius:16px;
     padding:26px 20px;margin:18px 0;text-align:center;
+    box-shadow:inset 0 0 40px rgba(255,0,60,.12),0 0 30px rgba(255,0,60,.15);
   }
   .code-label{font-size:11px;color:#8b8b9c;letter-spacing:3px;margin-bottom:12px;text-transform:uppercase}
-  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff003c;font-family:'Courier New',monospace}
-  .code-value.loading{font-size:16px;letter-spacing:0;color:#8b8b9c;font-style:italic}
+  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff003c;
+    font-family:'Courier New',monospace;text-shadow:0 0 24px rgba(255,0,60,.7)}
+  .code-value.loading{font-size:16px;letter-spacing:0;color:#8b8b9c;font-style:italic;text-shadow:none}
 
-  .steps{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.18);border-radius:12px;padding:16px 18px;font-size:13px;line-height:1.95;color:#c3c3d1}
+  .steps{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.18);border-radius:12px;
+    padding:16px 18px;font-size:13px;line-height:1.95;color:#c3c3d1}
   .steps b{color:#fff}
 
-  .msg{margin-top:14px;padding:12px 15px;border-radius:10px;font-size:13px;display:none}
+  .msg{margin-top:14px;padding:12px 15px;border-radius:10px;font-size:13px;display:none;letter-spacing:.4px}
   .msg.ok{background:rgba(255,0,60,.1);color:#ff8ba6;border:1px solid rgba(255,0,60,.4);display:block}
   .msg.err{background:rgba(255,60,60,.1);color:#ffa1a1;border:1px solid rgba(255,60,60,.4);display:block}
 
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  .stat{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;padding:14px 16px;text-align:center}
+  @media(max-width:520px){.grid2{grid-template-columns:1fr}}
+  .stat{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);
+    border-radius:14px;padding:14px 16px;text-align:center}
   .stat .k{font-size:10px;color:#8b8b9c;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
-  .stat .v{font-size:22px;font-weight:900;color:#fff;word-break:break-all}
+  .stat .v{font-size:22px;font-weight:900;color:#fff;text-shadow:0 0 14px rgba(255,0,60,.35);word-break:break-all}
   .stat .v.red{color:#ff003c}
-  .stat .v.green{color:#38ef7d}
+  .stat .v.green{color:#38ef7d;text-shadow:0 0 14px rgba(56,239,125,.4)}
   .stat .v.small{font-size:14px;font-weight:700}
   .statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
+  @media(max-width:520px){.statgrid{grid-template-columns:1fr 1fr}}
 
-  .log{background:#000;border:1px solid rgba(255,0,60,.25);border-radius:14px;padding:14px;height:340px;overflow-y:auto;font-family:'Courier New',monospace;font-size:12px;line-height:1.75}
+  .log{background:#000;border:1px solid rgba(255,0,60,.25);border-radius:14px;
+    padding:14px;height:340px;overflow-y:auto;font-family:'Courier New',monospace;
+    font-size:12px;line-height:1.75;box-shadow:inset 0 0 40px rgba(255,0,60,.08)}
+  .log::-webkit-scrollbar{width:8px}
+  .log::-webkit-scrollbar-track{background:#0a0a0f}
+  .log::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
   .log .line{color:#9a9aab;border-bottom:1px dashed rgba(255,255,255,.04);padding:2px 0;word-break:break-all}
   .log .t{color:#ff5277;margin-right:8px}
   .log .ok{color:#38ef7d}
@@ -513,63 +534,67 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .log .info{color:#6bc6ff}
   .log .warn{color:#ffc655}
 
-  .progress{height:8px;background:rgba(5,5,10,.8);border-radius:99px;overflow:hidden;border:1px solid rgba(255,0,60,.25);margin-top:12px}
-  .progress > div{height:100%;width:0%;background:linear-gradient(90deg,#ff003c,#ff5277,#ff003c);transition:width .4s ease}
+  .progress{height:8px;background:rgba(5,5,10,.8);border-radius:99px;overflow:hidden;
+    border:1px solid rgba(255,0,60,.25);margin-top:12px}
+  .progress > div{height:100%;width:0%;
+    background:linear-gradient(90deg,#ff003c,#ff5277,#ff003c);
+    background-size:200% 100%;transition:width .4s ease;animation:shine 2s linear infinite}
+  @keyframes shine{0%{background-position:0 0}100%{background-position:200% 0}}
 
   .groups-toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
   .groups-toolbar button{width:auto;margin-top:0;padding:10px 16px;font-size:11px}
-  .groups-toolbar .count{font-size:12px;color:#8b8b9c;margin-left:auto}
-  .groups-list{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;max-height:360px;overflow-y:auto;padding:8px}
-  .group-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer;border:1px solid transparent}
+  .groups-toolbar .count{font-size:12px;color:#8b8b9c;margin-left:auto;letter-spacing:1px}
+  .groups-list{
+    background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;
+    max-height:360px;overflow-y:auto;padding:8px;
+  }
+  .groups-list::-webkit-scrollbar{width:8px}
+  .groups-list::-webkit-scrollbar-track{background:#0a0a0f}
+  .groups-list::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
+  .group-item{
+    display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;
+    cursor:pointer;transition:.15s;border:1px solid transparent;
+  }
   .group-item:hover{background:rgba(255,0,60,.08);border-color:rgba(255,0,60,.25)}
   .group-item.selected{background:rgba(255,0,60,.14);border-color:#ff003c}
-  .group-item input[type=checkbox]{width:18px;height:18px;accent-color:#ff003c;cursor:pointer;flex-shrink:0}
+  .group-item input[type=checkbox]{
+    width:18px;height:18px;accent-color:#ff003c;cursor:pointer;flex-shrink:0;
+  }
   .group-info{flex:1;min-width:0}
-  .group-name{color:#f1f1f6;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .group-jid{color:#6b6b7a;font-size:11px;font-family:'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .group-name{color:#f1f1f6;font-size:13px;font-weight:600;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .group-jid{color:#6b6b7a;font-size:11px;font-family:'Courier New',monospace;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .group-meta{color:#ff5277;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0}
+
   .hidden{display:none!important}
-  .hint{font-size:11px;color:#6b6b7a;margin-top:8px}
+  .hint{font-size:11px;color:#6b6b7a;margin-top:8px;letter-spacing:.5px}
   .empty{padding:30px 20px;text-align:center;color:#6b6b7a;font-size:13px}
   .footer{text-align:center;color:#4b4b5a;font-size:11px;letter-spacing:3px;margin-top:30px;text-transform:uppercase}
+
+  .queue-box{
+    background:rgba(5,5,10,.7);border:1px solid rgba(255,0,60,.25);border-radius:12px;
+    padding:12px 14px;margin-top:8px;font-size:12px;color:#c3c3d1;
+    max-height:140px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.6;
+  }
+  .queue-box .qi{color:#6bc6ff;margin-right:8px}
 </style>
 </head>
 <body>
-
-<div id="loginOverlay">
-  <div class="login-card">
-    <h2>🔒 Admin Security</h2>
-    <div class="field">
-      <label>Enter Control Password</label>
-      <input id="adminPassInput" type="password" placeholder="Enter password (raja123)..." />
-    </div>
-    <button onclick="verifyPassword()">Unlock Dashboard</button>
-    <div id="loginMsg" class="msg"></div>
-  </div>
-</div>
+<div class="streaks"><span></span><span></span><span></span><span></span></div>
 
 <div class="container">
   <div class="brand">
-    <h1>9AMAN <span class="x">X</span> YAMDHUD</h1>
-    <p>Secure Multi-Session WhatsApp Manager</p>
+    <h1>RK <span class="x">X</span> RAJA</h1>
+    <p>WhatsApp Control Center</p>
   </div>
 
   <div class="tabs">
-    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard & Pairing</div>
-    <div class="tab" data-tab="sender" onclick="switchTab('sender')">Bulk Sender Hub</div>
+    <div class="tab active" data-tab="dashboard" onclick="switchTab('dashboard')">Dashboard</div>
+    <div class="tab" data-tab="sender" onclick="switchTab('sender')">Bulk Sender</div>
   </div>
 
   <div class="panel active" id="panel-dashboard">
-    <div class="card">
-      <h2><span class="dot"></span>Session Selection</h2>
-      <div class="field">
-        <label>Select or Create Session Name</label>
-        <div style="display:flex;gap:10px">
-          <select id="dashSessionSelect" onchange="onSessionChange()"></select>
-          <button class="ghost" style="width:auto;margin-top:0" onclick="createNewSessionPrompt()">+ New Session</button>
-        </div>
-      </div>
-    </div>
-
     <div class="card">
       <div class="status-row">
         <h2 style="margin:0"><span class="dot"></span>Connection Status</h2>
@@ -583,7 +608,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
 
     <div class="card" id="pairCard">
-      <h2><span class="dot"></span>Pair WhatsApp (New / Re-Link)</h2>
+      <h2><span class="dot"></span>Pair WhatsApp</h2>
       <label>Phone Number (country code, no + or spaces)</label>
       <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
       <button id="pairBtn" onclick="startPair()">Get Pairing Code</button>
@@ -626,8 +651,8 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <h2><span class="dot"></span>Danger Zone</h2>
-      <p class="hint">Logout deletes session auth data for this specific session name.</p>
-      <button class="ghost" onclick="logout()">Logout / Delete Session</button>
+      <p class="hint">Logout deletes auth — you'll need to pair again.</p>
+      <button class="ghost" onclick="logout()">Logout / Reset</button>
     </div>
   </div>
 
@@ -637,10 +662,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Select Session</h2>
           <div class="field">
-            <label>Active Sender Session</label>
-            <select id="senderSessionSelect" onchange="syncSessionDropdowns(this.value)"></select>
+            <label>Session</label>
+            <select id="sessionSelect">
+              <option value="default">default</option>
+            </select>
           </div>
-          <div class="hint">Choose which paired session runs this bulk queue job.</div>
+          <div class="hint" id="sessionHint">No available sessions (all sessions running)</div>
         </div>
 
         <div class="card">
@@ -727,47 +754,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">9MAN X YAMDHUT © — Secure Multi-Session WhatsApp Manager</div>
+  <div class="footer">RK RAJA XWD 💀 © — Secure Session</div>
 </div>
 
 <script>
-let authToken = localStorage.getItem('admin_token') || '';
-let currentSession = 'default';
-
-async function verifyPassword(){
-  const pass = document.getElementById('adminPassInput').value.trim();
-  const msg = document.getElementById('loginMsg');
-  try{
-    const res = await fetch('/api/login', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({password: pass})
-    });
-    const d = await res.json();
-    if(d.success){
-      authToken = d.token;
-      localStorage.setItem('admin_token', authToken);
-      document.getElementById('loginOverlay').style.display = 'none';
-      initApp();
-    } else {
-      showMsg(msg, 'err', 'Incorrect Password');
-    }
-  }catch(e){showMsg(msg, 'err', e.message);}
-}
-
-if(authToken){
-  fetch('/api/verify', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({token: authToken})
-  }).then(r=>r.json()).then(d=>{
-    if(d.success){
-      document.getElementById('loginOverlay').style.display = 'none';
-      initApp();
-    } else {
-      localStorage.removeItem('admin_token');
-    }
-  }).catch(()=>{});
-}
-
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
   document.querySelectorAll('.panel').forEach(p=>p.classList.toggle('active',p.id==='panel-'+name));
@@ -775,58 +765,16 @@ function switchTab(name){
 function showMsg(el,type,text){el.textContent=text;el.style.display=type?'block':'none';el.className='msg'+(type?' '+type:'');}
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 function clearLog(){document.getElementById('logBox').innerHTML='';}
-
-async function loadSessions(){
-  try{
-    const res = await fetch('/api/sessions', {headers:{'x-admin-token': authToken}});
-    const d = await res.json();
-    if(d.sessions){
-      const opts = d.sessions.map(s => '<option value="'+s+'" '+(s===currentSession?'selected':'')+'>'+s+'</option>').join('');
-      document.getElementById('dashSessionSelect').innerHTML = opts;
-      document.getElementById('senderSessionSelect').innerHTML = opts;
-      if(!d.sessions.includes(currentSession) && d.sessions.length){
-        currentSession = d.sessions[0];
-      }
-    }
-  }catch(e){console.error(e);}
+function log(type,msg){
+  const box=document.getElementById('logBox');
+  const t=new Date().toLocaleTimeString();
+  const el=document.createElement('div');
+  el.className='line '+type;
+  el.innerHTML='<span class="t">['+t+']</span>'+escapeHtml(msg);
+  box.appendChild(el);
+  box.scrollTop=box.scrollHeight;
+  while(box.children.length>500) box.removeChild(box.firstChild);
 }
-
-function onSessionChange(){
-  currentSession = document.getElementById('dashSessionSelect').value;
-  document.getElementById('senderSessionSelect').value = currentSession;
-  allGroups = [];
-  dashSelected.clear();
-  bulkSelected.clear();
-  renderDashGroups();
-  renderBulkGroups();
-  clearLog();
-  pollStatus();
-}
-
-function syncSessionDropdowns(val){
-  currentSession = val;
-  document.getElementById('dashSessionSelect').value = currentSession;
-  allGroups = [];
-  dashSelected.clear();
-  bulkSelected.clear();
-  renderDashGroups();
-  renderBulkGroups();
-  clearLog();
-  pollStatus();
-}
-
-async function createNewSessionPrompt(){
-  const name = prompt('Enter new session name (e.g. session2, bot2):');
-  if(!name) return;
-  const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  if(!clean) return;
-  currentSession = clean;
-  await loadSessions();
-  document.getElementById('dashSessionSelect').value = currentSession;
-  document.getElementById('senderSessionSelect').value = currentSession;
-  onSessionChange();
-}
-
 async function startPair(){
   const phone=document.getElementById('phoneInput').value.trim();
   const btn=document.getElementById('pairBtn');
@@ -835,11 +783,7 @@ async function startPair(){
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
-    const res=await fetch('/api/pair',{
-      method:'POST', 
-      headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
-      body:JSON.stringify({phone, session: currentSession})
-    });
+    const res=await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone})});
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
@@ -849,20 +793,10 @@ async function startPair(){
   }catch(e){showMsg(msgEl,'err',e.message);}
   finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
 }
-
 async function logout(){
-  if(!confirm('Logout session "'+currentSession+'"? Auth will be deleted.'))return;
-  try{
-    await fetch('/api/logout',{
-      method:'POST',
-      headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
-      body:JSON.stringify({session: currentSession})
-    });
-    await loadSessions();
-    onSessionChange();
-  }catch(e){alert(e.message);}
+  if(!confirm('Logout? Auth will be deleted.'))return;
+  try{await fetch('/api/logout',{method:'POST'});location.reload();}catch(e){alert(e.message);}
 }
-
 let allGroups=[];
 let dashSelected=new Set();
 let bulkSelected=new Set();
@@ -873,24 +807,25 @@ async function fetchGroups(){
   btn.disabled=true;btn.textContent='Fetching...';
   listEl.innerHTML='<div class="empty">Loading groups...</div>';
   try{
-    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
+    const res=await fetch('/api/groups');
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed to fetch');
     allGroups = d.groups || [];
     renderDashGroups();
     renderBulkGroups();
+    log('info', 'Fetched '+allGroups.length+' groups');
   }catch(e){
     listEl.innerHTML='<div class="empty" style="color:#ff6b6b">'+escapeHtml(e.message)+'</div>';
+    log('err','Fetch groups: '+e.message);
   }finally{
     btn.disabled=false;btn.textContent='Refresh Groups';
   }
 }
-
 function renderDashGroups(){
   const listEl=document.getElementById('groupsList');
   document.getElementById('groupsCount').textContent=allGroups.length+' groups';
   if(!allGroups.length){
-    listEl.innerHTML='<div class="empty">No groups found</div>';
+    listEl.innerHTML='<div class="empty">No groups found for this WhatsApp account</div>';
     return;
   }
   listEl.innerHTML = allGroups.map(g=>{
@@ -902,6 +837,7 @@ function renderDashGroups(){
         '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
         '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
       '</div>'+
+      '<div class="group-meta">'+(g.size?g.size+' members':'')+'</div>'+
     '</label>';
   }).join('');
 }
@@ -923,16 +859,17 @@ async function sendToSelectedGroups(){
   btn.disabled=true;btn.textContent='Sending...';showMsg(box,'','');
   try{
     const res=await fetch('/api/send-groups',{
-      method:'POST',headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
-      body:JSON.stringify({session: currentSession, groupIds:[...dashSelected], message:msg})
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({groupIds:[...dashSelected], message:msg})
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
-    showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups');
-  }catch(e){showMsg(box,'err',e.message);}
+    showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups'+(d.failed?' ('+d.failed+' failed)':''));
+    log('ok','Group send: '+d.sent+'/'+d.total+' success');
+    if(d.errors&&d.errors.length) d.errors.forEach(e=>log('err',e));
+  }catch(e){showMsg(box,'err',e.message);log('err','Group send: '+e.message);}
   finally{btn.disabled=false;btn.textContent='Send to Selected Groups';}
 }
-
 async function fetchGroupsForBulk(){
   if(allGroups.length){ renderBulkGroups(); return; }
   await fetchGroups();
@@ -953,6 +890,7 @@ function renderBulkGroups(){
         '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
         '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
       '</div>'+
+      '<div class="group-meta">'+(g.size?g.size+' members':'')+'</div>'+
     '</label>';
   }).join('');
 }
@@ -992,47 +930,45 @@ async function startServer(){
   if(delay<3) delay=3;
   const lastHater=document.getElementById('lastHaterInput').value.trim();
 
-  if(!file){alert('Please upload a .txt file');return;}
-  if(bulkSelected.size===0){alert('Please select at least one group');return;}
+  if(!file){alert('Please upload a .txt file — each line will be a separate message');return;}
+  if(bulkSelected.size===0){alert('Please select at least one group as target');return;}
 
   const startBtn=document.getElementById('startBtn');
   const stopBtn=document.getElementById('stopBtn');
   startBtn.disabled=true;startBtn.textContent='Starting...';
 
   const fd=new FormData();
-  fd.append('session', currentSession);
   fd.append('file',file);
   fd.append('hater',hater);
   fd.append('delay',String(delay));
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
 
+  log('info','Starting bulk task...');
   try{
-    const res=await fetch('/api/bulk/start',{method:'POST', headers:{'x-admin-token': authToken}, body:fd});
+    const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
-    log('ok','Task started — '+d.total+' messages');
+    log('ok','Task started — '+d.total+' messages in queue, '+d.totalTargets+' targets');
     stopBtn.disabled=false;
   }catch(e){
+    log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
   }finally{
     startBtn.disabled=false;startBtn.textContent='Start Server';
   }
 }
-
 async function stopTask(){
   try{
-    await fetch('/api/bulk/stop',{
-      method:'POST',headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
-      body:JSON.stringify({session: currentSession})
-    });
-    log('warn','Stop requested');
-  }catch(e){}
+    const res=await fetch('/api/bulk/stop',{method:'POST'});
+    const d=await res.json();
+    if(d.success) log('warn','Stop requested — task will halt immediately');
+    else log('err',d.error||'No task running');
+  }catch(e){log('err',e.message);}
 }
-
 async function pollStatus(){
   try{
-    const res=await fetch('/api/status?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
+    const res=await fetch('/api/status');
     const d=await res.json();
     const badge=document.getElementById('badge');
     const infoPhone=document.getElementById('infoPhone');
@@ -1040,33 +976,34 @@ async function pollStatus(){
     const errBox=document.getElementById('errBox');
     const codeSection=document.getElementById('codeSection');
     const codeValue=document.getElementById('codeValue');
+    const pairCard=document.getElementById('pairCard');
     const phoneInput=document.getElementById('phoneInput');
     const pairBtn=document.getElementById('pairBtn');
-
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
-      codeSection.classList.add('hidden');
+      codeSection.classList.add('hidden');pairCard.classList.add('hidden');
     }else if(d.code){
       badge.textContent='Waiting for pairing';badge.className='badge b-wait';
       codeSection.classList.remove('hidden');
       codeValue.textContent=d.code;codeValue.classList.remove('loading');
+      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else if(d.connecting){
       badge.textContent='Connecting';badge.className='badge b-wait';
+      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else{
       badge.textContent='Idle';badge.className='badge b-idle';
-      codeSection.classList.add('hidden');
+      phoneInput.disabled=false;pairBtn.disabled=false;
     }
     if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
     else{errBox.classList.add('hidden');}
-  }catch(e){}
+  }catch(e){console.error(e);}
 }
-
 let lastLogId=0;
 async function pollStats(){
   try{
-    const res=await fetch('/api/bulk/status?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
+    const res=await fetch('/api/bulk/status');
     const d=await res.json();
 
     const statusEl=document.getElementById('statStatus');
@@ -1080,12 +1017,18 @@ async function pollStats(){
     document.getElementById('statCycle').textContent=d.cycle||0;
     document.getElementById('statTotal').textContent=d.total||0;
     document.getElementById('statRemaining').textContent=d.remaining||0;
-    document.getElementById('statCurMsg').textContent=d.currentMessage?d.currentMessage.slice(0,40):'—';
+
+    document.getElementById('statCurMsg').textContent=d.currentMessage?(d.currentMessage.slice(0,40)+(d.currentMessage.length>40?'…':'')):'—';
     document.getElementById('statCurTarget').textContent=d.currentTarget?d.currentTarget.slice(0,30):'—';
 
     const pct=(d.total&&d.total>0)?Math.round(((d.total-d.remaining)/d.total)*100):0;
     document.getElementById('statProgress').textContent=pct+'%';
     document.getElementById('progBar').style.width=pct+'%';
+
+    const startBtn=document.getElementById('startBtn');
+    const stopBtn=document.getElementById('stopBtn');
+    if(d.running){startBtn.disabled=true;stopBtn.disabled=false;}
+    else{startBtn.disabled=false;stopBtn.disabled=true;}
 
     if(d.logs&&d.logs.length){
       const box=document.getElementById('logBox');
@@ -1097,80 +1040,48 @@ async function pollStats(){
           box.appendChild(el);
         }
       });
-      if(d.logs.length) lastLogId=d.logs[d.logs.length-1].id;
+      lastLogId=d.logs[d.logs.length-1].id;
       box.scrollTop=box.scrollHeight;
+      while(box.children.length>500) box.removeChild(box.firstChild);
     }
-  }catch(e){}
+  }catch(e){console.error(e);}
 }
-
-function initApp(){
-  loadSessions().then(()=>{
-    setInterval(pollStatus,2000);
-    setInterval(pollStats,1500);
-    pollStatus();
-    pollStats();
-  });
-}
+setInterval(pollStatus,2000);
+setInterval(pollStats,1500);
+pollStatus();
+pollStats();
 </script>
 </body>
 </html>`;
 
+// ============================================================
+// Express app
+// ============================================================
 const app = express();
 app.use(express.json());
-
-const activeTokens = new Set();
-
-app.post('/api/login', (req, res) => {
-  const { password } = req.body;
-  if (password === ADMIN_PASSWORD) {
-    const token = 'token_' + Math.random().toString(36).substring(2) + Date.now();
-    activeTokens.add(token);
-    return res.json({ success: true, token });
-  }
-  res.status(401).json({ success: false, error: 'Invalid password' });
-});
-
-app.post('/api/verify', (req, res) => {
-  const { token } = req.body;
-  if (token && activeTokens.has(token)) {
-    return res.json({ success: true });
-  }
-  res.json({ success: false });
-});
-
-const requireAuth = (req, res, next) => {
-  const token = req.headers['x-admin-token'];
-  if (token && activeTokens.has(token)) {
-    return next();
-  }
-  res.status(401).json({ success: false, error: 'Unauthorized access' });
-};
 
 app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
-app.get('/api/sessions', requireAuth, (req, res) => {
-  const list = Object.keys(sessions);
-  if (!list.includes('default')) list.unshift('default');
-  res.json({ success: true, sessions: list });
-});
-
-app.post('/api/pair', requireAuth, async (req, res) => {
+app.post('/api/pair', async (req, res) => {
   try {
-    const { phone, session } = req.body;
-    const sess = getOrCreateSession(session);
-
+    const { phone } = req.body;
     if (!phone || !/^\d{10,15}$/.test(phone)) {
       return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
-    if (sess.isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection already in progress' });
+    if (isPaired) return res.status(400).json({ success: false, error: 'Already paired. Logout first.' });
+    if (isConnecting) {
+      return res.status(400).json({
+        success: false,
+        error: 'Connection in progress for ' + (currentPhone || 'another number') + '. Wait or logout.',
+      });
     }
-    if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
+    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
 
-    sess.connect(phone).catch((e) => {
-      sess.lastError = e.message;
+    connectToWhatsApp(phone).catch((e) => {
+      console.error('Connect failed:', e.message);
+      lastError = e.message;
     });
 
     res.json({ success: true, message: 'Pairing initiated' });
@@ -1179,40 +1090,40 @@ app.post('/api/pair', requireAuth, async (req, res) => {
   }
 });
 
-app.get('/api/status', requireAuth, (req, res) => {
-  const sessName = req.query.session || 'default';
-  const sess = getOrCreateSession(sessName);
+app.get('/api/status', (req, res) => {
   res.json({
-    paired: sess.isPaired,
-    connecting: sess.isConnecting,
-    code: sess.isPaired ? null : sess.pairingCode,
-    phone: sess.currentPhone,
-    connectedAt: sess.connectedAt,
-    error: sess.lastError,
+    paired: isPaired,
+    connecting: isConnecting,
+    code: isPaired ? null : pairingCode,
+    phone: currentPhone,
+    connectedAt,
+    error: lastError,
   });
 });
 
-app.get('/api/groups', requireAuth, async (req, res) => {
+app.get('/api/groups', async (req, res) => {
   try {
-    const sessName = req.query.session || 'default';
-    const sess = getOrCreateSession(sessName);
-
-    if (!sess.isPaired || !sess.sock) {
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired' });
+    if (!isPaired || !sock) {
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
     }
 
     const map = new Map();
-    Object.values(sess.groupsCache).forEach((g) => map.set(g.id, g));
+    Object.values(groupsCache).forEach((g) => map.set(g.id, g));
 
     try {
-      sess.getGroupsFromStore().forEach((g) => {
+      getGroupsFromStore().forEach((g) => {
         if (!map.has(g.id)) map.set(g.id, g);
+        else {
+          const existing = map.get(g.id);
+          if (!existing.name && g.name) existing.name = g.name;
+          if (!existing.size && g.size) existing.size = g.size;
+        }
       });
     } catch (_) {}
 
-    if (map.size === 0 && typeof sess.sock.groupFetchAllParticipating === 'function') {
+    if (map.size === 0 && typeof sock.groupFetchAllParticipating === 'function') {
       try {
-        const all = await sess.sock.groupFetchAllParticipating();
+        const all = await sock.groupFetchAllParticipating();
         Object.values(all).forEach((g) => {
           map.set(g.id, {
             id: g.id,
@@ -1220,27 +1131,28 @@ app.get('/api/groups', requireAuth, async (req, res) => {
             size: g.participants ? g.participants.length : 0,
           });
         });
-      } catch (e) {}
+      } catch (e) {
+        console.error('groupFetchAllParticipating failed:', e.message);
+      }
     }
 
     const groups = [...map.values()]
       .filter((g) => g.id && g.id.endsWith('@g.us'))
       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
 
-    groups.forEach((g) => { sess.groupsCache[g.id] = g; });
+    groups.forEach((g) => { groupsCache[g.id] = g; });
 
     res.json({ success: true, groups });
   } catch (err) {
+    console.error('Fetch groups error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/send-groups', requireAuth, async (req, res) => {
+app.post('/api/send-groups', async (req, res) => {
   try {
-    const { session, groupIds, message } = req.body;
-    const sess = getOrCreateSession(session);
-
-    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired' });
+    if (!isPaired || !sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
+    const { groupIds, message } = req.body;
     if (!Array.isArray(groupIds) || !groupIds.length) {
       return res.status(400).json({ success: false, error: 'No groups selected' });
     }
@@ -1252,156 +1164,162 @@ app.post('/api/send-groups', requireAuth, async (req, res) => {
     const errors = [];
     for (const jid of groupIds) {
       try {
-        await sess.sock.sendMessage(jid, { text: message });
+        await sock.sendMessage(jid, { text: message });
         sent++;
       } catch (e) {
         failed++;
         errors.push(jid + ': ' + e.message);
       }
-      await new Promise((r) => setTimeout(r, 800));
+      await sleep(800);
     }
     res.json({ success: true, sent, failed, total: groupIds.length, errors });
   } catch (err) {
+    console.error('Send groups error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/logout', requireAuth, async (req, res) => {
+app.post('/api/logout', async (req, res) => {
   try {
-    const { session } = req.body;
-    const sessName = session || 'default';
-    const sess = sessions[sessName];
-    if (sess) {
-      await sess.logout();
-      delete sessions[sessName];
+    // Force stop worker first
+    if (bulkState.running) {
+      bulkState.stopFlag = true;
+      pushLog('warn', 'Logout — stopping worker');
     }
+    if (sock) { try { await sock.logout(); } catch (_) {} }
+    if (fs.existsSync(AUTH_DIR)) fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+    isPaired = false; pairingCode = null; currentPhone = null;
+    pairingRequested = false; isConnecting = false;
+    connectedAt = null; lastError = null; sock = null;
+    groupsCache = {};
+    pushLog('warn', 'Logged out, auth cleared');
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/bulk/start', requireAuth, upload.single('file'), async (req, res) => {
+// ============================================================
+// BULK START — messages queue × targets, continuous 24/7 loop
+// ============================================================
+app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
-    const { session, hater, delay, lastHater, groupIds } = req.body;
-    const sess = getOrCreateSession(session);
-
-    if (!sess.isPaired || !sess.sock) {
+    if (!isPaired || !sock) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired.' });
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired yet. Pair from Dashboard first.' });
     }
-    if (sess.bulkState.running) {
+    if (bulkState.running) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running.' });
+      return res.status(400).json({ success: false, error: 'A task is already running. Please STOP it first.' });
     }
     if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
+      return res.status(400).json({ success: false, error: 'Please upload a .txt file (each line = one message)' });
     }
 
+    const { hater, delay, lastHater, groupIds } = req.body;
+
+    // Load messages into memory NOW (file gets deleted after)
     let messages = [];
     try {
-      const content = fs.readFileSync(req.file.path, 'utf8');
-      const seen = new Set();
-      content.split(/\r?\n/).forEach((line) => {
-        const t = line.trim();
-        if (t && !seen.has(t)) {
-          seen.add(t);
-          messages.push(t);
-        }
-      });
+      messages = parseMessagesFile(req.file.path);
     } finally {
       try { fs.unlinkSync(req.file.path); } catch (_) {}
     }
 
     if (!messages.length) {
-      return res.status(400).json({ success: false, error: 'No valid messages found' });
+      return res.status(400).json({ success: false, error: 'No valid messages found (all empty/duplicate)' });
     }
 
+    // Targets
     const targets = [];
-    const seenT = new Set();
+    const seen = new Set();
     let parsedGroups = [];
     try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
     parsedGroups.forEach((jid) => {
-      if (jid && !seenT.has(jid)) { seenT.add(jid); targets.push({ jid, label: jid }); }
+      if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
     });
 
     if (!targets.length) {
-      return res.status(400).json({ success: false, error: 'No target groups selected' });
+      return res.status(400).json({ success: false, error: 'No targets — select at least one group' });
     }
 
+    // Enforce delay
     let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS;
     if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
+    const waitMs = delaySec * 1000;
 
+    // Apply prefix/suffix
     const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
     const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
-    sess.bulkState.running = true;
-    sess.bulkState.stopFlag = false;
-    sess.bulkState.sent = 0;
-    sess.bulkState.failed = 0;
-    sess.bulkState.tasks += 1;
-    sess.bulkState.total = messages.length;
-    sess.bulkState.remaining = messages.length;
-    sess.bulkState.cycle = 0;
-    sess.bulkState.msgIndex = 0;
-    sess.bulkState.targetIndex = 0;
-    sess.bulkState.totalTargets = targets.length;
-    sess.bulkState.currentMessage = preparedMessages[0] || '';
-    sess.bulkState.currentTarget = targets[0] ? targets[0].label : '';
-    sess.bulkState.targets = targets;
-    sess.bulkState.messages = preparedMessages;
-    sess.bulkState.delayMs = delaySec * 1000;
-    sess.bulkState.startedAt = Date.now();
-    sess.bulkState.workerAlive = false;
-    sess.bulkState.lastBeat = Date.now();
+    // Reset state
+    bulkState.running = true;
+    bulkState.stopFlag = false;
+    bulkState.sent = 0;
+    bulkState.failed = 0;
+    bulkState.tasks += 1;
+    bulkState.total = messages.length;
+    bulkState.remaining = messages.length;
+    bulkState.cycle = 0;
+    bulkState.msgIndex = 0;
+    bulkState.targetIndex = 0;
+    bulkState.totalTargets = targets.length;
+    bulkState.currentMessage = preparedMessages[0] || '';
+    bulkState.currentTarget = targets[0] ? targets[0].label : '';
+    bulkState.targets = targets;
+    bulkState.messages = preparedMessages;
+    bulkState.delayMs = waitMs;
+    bulkState.startedAt = Date.now();
+    bulkState.workerAlive = false;
+    bulkState.lastBeat = Date.now();
 
-    sess.pushLog('info', `Task started — ${messages.length} messages × ${targets.length} targets`);
+    pushLog('info', `Task #${bulkState.tasks} started — ${messages.length} messages × ${targets.length} targets, delay ${delaySec}s`);
+    pushLog('info', 'Loop mode: 24/7 continuous. Press Emergency Stop to halt.');
 
-    sess.runWorker();
+    // Launch worker (non-blocking)
+    runWorker();
 
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
   } catch (err) {
+    console.error('Bulk start error:', err);
     res.status(500).json({ success: false, error: err.message });
   }
 });
 
-app.post('/api/bulk/stop', requireAuth, (req, res) => {
-  const { session } = req.body;
-  const sess = getOrCreateSession(session);
-  if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
-  sess.bulkState.stopFlag = true;
-  sess.pushLog('warn', 'Stop signal received');
+app.post('/api/bulk/stop', (req, res) => {
+  if (!bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
+  bulkState.stopFlag = true;
+  pushLog('warn', 'Stop signal received — halting loop');
   res.json({ success: true });
 });
 
-app.get('/api/bulk/status', requireAuth, (req, res) => {
-  const sessName = req.query.session || 'default';
-  const sess = getOrCreateSession(sessName);
+app.get('/api/bulk/status', (req, res) => {
   res.json({
-    running: sess.bulkState.running,
-    workerAlive: sess.bulkState.workerAlive,
-    paired: sess.isPaired,
-    sent: sess.bulkState.sent,
-    failed: sess.bulkState.failed,
-    tasks: sess.bulkState.tasks,
-    total: sess.bulkState.total,
-    remaining: sess.bulkState.remaining,
-    cycle: sess.bulkState.cycle,
-    msgIndex: sess.bulkState.msgIndex,
-    targetIndex: sess.bulkState.targetIndex,
-    totalTargets: sess.bulkState.totalTargets,
-    currentMessage: sess.bulkState.currentMessage,
-    currentTarget: sess.bulkState.currentTarget,
+    running: bulkState.running,
+    workerAlive: bulkState.workerAlive,
+    paired: isPaired,
+    sent: bulkState.sent,
+    failed: bulkState.failed,
+    tasks: bulkState.tasks,
+    total: bulkState.total,
+    remaining: bulkState.remaining,
+    cycle: bulkState.cycle,
+    msgIndex: bulkState.msgIndex,
+    targetIndex: bulkState.targetIndex,
+    totalTargets: bulkState.totalTargets,
+    currentMessage: bulkState.currentMessage,
+    currentTarget: bulkState.currentTarget,
     uptimeFormatted: formatUptime(Date.now() - serverStartTime),
-    logs: sess.bulkState.logs.slice(-200),
+    logs: bulkState.logs.slice(-200),
   });
 });
 
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (req, res) => res.json({ status: 'ok', paired: isPaired }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Secure Multi-Session Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🌐 Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  pushLog('info', 'Server started');
 });
 
 process.on('SIGTERM', () => process.exit(0));
