@@ -15,6 +15,9 @@ const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
 const SESSIONS_BASE_DIR = 'sessions_data';
 
+// Yahan apna Admin Password set kar lo jo website kholte hi maangega
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'raja123';
+
 if (!fs.existsSync(SESSIONS_BASE_DIR)) {
   fs.mkdirSync(SESSIONS_BASE_DIR, { recursive: true });
 }
@@ -25,7 +28,6 @@ const SEND_RETRY = 1;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 30000;
 
-// Active sessions registry mapping sessionName -> SessionContext
 const sessions = {};
 let serverStartTime = Date.now();
 
@@ -343,7 +345,6 @@ class WhatsAppSession {
   }
 }
 
-// Watchdog interval for all sessions
 setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && !sess.bulkState.workerAlive) {
@@ -353,7 +354,6 @@ setInterval(() => {
   });
 }, WATCHDOG_INTERVAL_MS);
 
-// Helper to get or create session
 function getOrCreateSession(name) {
   const cleanName = (name || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   if (!sessions[cleanName]) {
@@ -362,7 +362,6 @@ function getOrCreateSession(name) {
   return sessions[cleanName];
 }
 
-// Auto-discover any pre-existing session folders on startup
 if (fs.existsSync(SESSIONS_BASE_DIR)) {
   fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
     if (dirent.isDirectory()) {
@@ -375,14 +374,14 @@ if (Object.keys(sessions).length === 0) {
 }
 
 // ============================================================
-// EMBEDDED HTML (Multi-Session UI)
+// EMBEDDED HTML WITH LOGIN SCREEN & PERMANENT PAIRING INPUT
 // ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>9AMAN X YAMDHUD — Multi-Session Control Center</title>
+<title>9AMAN X YAMDHUD — Secure Control Center</title>
 <style>
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
@@ -397,28 +396,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       radial-gradient(900px 600px at 85% 90%, rgba(255,0,60,.14), transparent 65%),
       linear-gradient(135deg,#050507 0%,#0b0b12 55%,#050507 100%);
   }
-  body::after{
-    content:"";position:fixed;inset:0;z-index:-1;pointer-events:none;
-    background-image:
-      linear-gradient(115deg, transparent 40%, rgba(255,0,60,.06) 41%, transparent 42%),
-      linear-gradient(115deg, transparent 60%, rgba(255,0,60,.05) 61%, transparent 62%),
-      repeating-linear-gradient(115deg, rgba(255,255,255,.015) 0 1px, transparent 1px 60px);
-    mask-image:radial-gradient(circle at 50% 40%, #000 30%, transparent 90%);
-  }
-  .streaks{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
-  .streaks span{
-    position:absolute;height:1px;width:220px;left:-30%;
-    background:linear-gradient(90deg,transparent,#ff003c,transparent);
-    filter:drop-shadow(0 0 6px #ff003c);opacity:.55;
-    animation:streak 7s linear infinite;
-  }
-  .streaks span:nth-child(2){top:25%;animation-delay:1.5s;animation-duration:9s}
-  .streaks span:nth-child(3){top:55%;animation-delay:3s;animation-duration:8s}
-  .streaks span:nth-child(4){top:78%;animation-delay:4.5s;animation-duration:10s}
-  @keyframes streak{from{transform:translateX(0) rotate(-12deg)}to{transform:translateX(160vw) rotate(-12deg)}}
-
   .container{max-width:1180px;margin:0 auto;padding:28px 18px 60px;position:relative;z-index:1}
-
   .brand{text-align:center;margin-bottom:26px}
   .brand h1{
     font-size:clamp(22px,4vw,38px);font-weight:900;letter-spacing:3px;
@@ -430,6 +408,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .brand h1 .x{color:#ff003c;-webkit-text-fill-color:#ff003c;text-shadow:0 0 18px #ff003c}
   .brand p{color:#8b8b9c;font-size:11px;letter-spacing:3px;margin-top:6px;text-transform:uppercase}
 
+  /* Login Overlay */
+  #loginOverlay{
+    position:fixed;inset:0;background:#050507;z-index:9999;
+    display:flex;align-items:center;justify-content:center;padding:20px;
+  }
+  .login-card{
+    width:100%;max-width:400px;
+    background:linear-gradient(155deg, rgba(20,20,28,.9), rgba(10,10,15,.95));
+    border:1px solid rgba(255,0,60,.4);border-radius:20px;padding:30px;
+    box-shadow:0 25px 60px rgba(0,0,0,.8),0 0 40px rgba(255,0,60,.15);
+  }
+  .login-card h2{color:#fff;font-size:16px;margin-bottom:20px;text-align:center;letter-spacing:2px;text-transform:uppercase}
+
   .tabs{display:flex;gap:10px;margin-bottom:20px;flex-wrap:wrap;justify-content:center}
   .tab{
     padding:11px 20px;border-radius:12px;font-size:12px;font-weight:700;letter-spacing:2px;
@@ -440,8 +431,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     background:linear-gradient(180deg,#ff0a45,#c40030);color:#fff;border-color:#ff003c;
     box-shadow:0 8px 24px rgba(255,0,60,.35),inset 0 1px 0 rgba(255,255,255,.25);
   }
-  .tab:hover:not(.active){background:rgba(255,0,60,.12)}
-
   .panel{display:none}
   .panel.active{display:block;animation:fade .3s ease}
   @keyframes fade{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
@@ -454,15 +443,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     background:linear-gradient(155deg, rgba(20,20,28,.72), rgba(10,10,15,.55));
     border:1px solid rgba(255,0,60,.28);
     border-radius:18px;padding:24px;margin-bottom:20px;
-    backdrop-filter:blur(16px) saturate(140%);
-    -webkit-backdrop-filter:blur(16px) saturate(140%);
-    box-shadow:0 20px 50px rgba(0,0,0,.55),inset 0 1px 0 rgba(255,255,255,.05),0 0 32px rgba(255,0,60,.06);
-  }
-  .card::before{
-    content:"";position:absolute;inset:-1px;border-radius:18px;padding:1px;
-    background:linear-gradient(135deg, rgba(255,0,60,.55), transparent 40%, transparent 60%, rgba(255,0,60,.35));
-    -webkit-mask:linear-gradient(#000 0 0) content-box,linear-gradient(#000 0 0);
-    -webkit-mask-composite:xor;mask-composite:exclude;pointer-events:none;opacity:.7;
+    backdrop-filter:blur(16px);box-shadow:0 20px 50px rgba(0,0,0,.55);
   }
   .card h2{
     font-size:13px;margin-bottom:16px;color:#fff;letter-spacing:2px;
@@ -473,27 +454,21 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   label{display:block;font-size:11px;color:#9a9aab;margin-bottom:7px;letter-spacing:1.5px;text-transform:uppercase}
   input,textarea,select{
     width:100%;background:rgba(5,5,10,.75);border:1px solid rgba(255,0,60,.25);
-    border-radius:12px;padding:12px 14px;color:#f1f1f6;font-size:14px;
-    font-family:inherit;outline:none;transition:.25s;
+    border-radius:12px;padding:12px 14px;color:#f1f1f6;font-size:14px;outline:none;transition:.25s;
   }
-  input:focus,textarea:focus,select:focus{
-    border-color:#ff003c;box-shadow:0 0 0 3px rgba(255,0,60,.14),0 0 22px rgba(255,0,60,.25);
-  }
-  input:disabled{color:#5c5c6d;cursor:not-allowed}
+  input:focus,textarea:focus,select:focus{border-color:#ff003c;box-shadow:0 0 0 3px rgba(255,0,60,.14)}
   textarea{resize:vertical;min-height:96px}
   .field{margin-bottom:14px}
 
   button{
     background:linear-gradient(180deg,#ff0a45,#c40030);color:#fff;border:none;
     border-radius:12px;padding:13px 24px;font-size:12px;font-weight:700;
-    letter-spacing:2px;text-transform:uppercase;cursor:pointer;
-    transition:.22s;margin-top:6px;width:100%;
-    box-shadow:0 8px 24px rgba(255,0,60,.28),inset 0 1px 0 rgba(255,255,255,.25);
+    letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:.22s;margin-top:6px;width:100%;
+    box-shadow:0 8px 24px rgba(255,0,60,.28);
   }
   button:hover:not(:disabled){transform:translateY(-1px);box-shadow:0 12px 30px rgba(255,0,60,.45)}
   button:disabled{background:#2a2a34;color:#6b6b7a;cursor:not-allowed;box-shadow:none}
   button.ghost{background:transparent;border:1px solid rgba(255,0,60,.5);color:#ff5277;box-shadow:none}
-  button.ghost:hover:not(:disabled){background:rgba(255,0,60,.1)}
   button.danger{background:linear-gradient(180deg,#ff0040,#a80028);border:1px solid #ff003c}
   .btnrow{display:flex;gap:10px}
   .btnrow button{margin-top:0}
@@ -502,46 +477,34 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .badge{display:inline-block;padding:7px 16px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1px;text-transform:uppercase}
   .b-idle{background:rgba(120,120,140,.15);color:#a8a8b8;border:1px solid rgba(120,120,140,.35)}
   .b-wait{background:rgba(255,180,0,.12);color:#ffc655;border:1px solid rgba(255,180,0,.4);animation:pulse 1.6s infinite}
-  .b-paired{background:rgba(255,0,60,.14);color:#ff5277;border:1px solid rgba(255,0,60,.55);box-shadow:0 0 18px rgba(255,0,60,.25)}
-  .b-run{background:rgba(56,239,125,.14);color:#38ef7d;border:1px solid rgba(56,239,125,.55);box-shadow:0 0 18px rgba(56,239,125,.3);animation:pulse 1.6s infinite}
+  .b-paired{background:rgba(255,0,60,.14);color:#ff5277;border:1px solid rgba(255,0,60,.55)}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 
   .code-box{
     background:rgba(5,5,10,.85);border:2px dashed #ff003c;border-radius:16px;
     padding:26px 20px;margin:18px 0;text-align:center;
-    box-shadow:inset 0 0 40px rgba(255,0,60,.12),0 0 30px rgba(255,0,60,.15);
   }
   .code-label{font-size:11px;color:#8b8b9c;letter-spacing:3px;margin-bottom:12px;text-transform:uppercase}
-  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff003c;
-    font-family:'Courier New',monospace;text-shadow:0 0 24px rgba(255,0,60,.7)}
-  .code-value.loading{font-size:16px;letter-spacing:0;color:#8b8b9c;font-style:italic;text-shadow:none}
+  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff003c;font-family:'Courier New',monospace}
+  .code-value.loading{font-size:16px;letter-spacing:0;color:#8b8b9c;font-style:italic}
 
-  .steps{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.18);border-radius:12px;
-    padding:16px 18px;font-size:13px;line-height:1.95;color:#c3c3d1}
+  .steps{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.18);border-radius:12px;padding:16px 18px;font-size:13px;line-height:1.95;color:#c3c3d1}
   .steps b{color:#fff}
 
-  .msg{margin-top:14px;padding:12px 15px;border-radius:10px;font-size:13px;display:none;letter-spacing:.4px}
+  .msg{margin-top:14px;padding:12px 15px;border-radius:10px;font-size:13px;display:none}
   .msg.ok{background:rgba(255,0,60,.1);color:#ff8ba6;border:1px solid rgba(255,0,60,.4);display:block}
   .msg.err{background:rgba(255,60,60,.1);color:#ffa1a1;border:1px solid rgba(255,60,60,.4);display:block}
 
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media(max-width:520px){.grid2{grid-template-columns:1fr}}
-  .stat{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);
-    border-radius:14px;padding:14px 16px;text-align:center}
+  .stat{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;padding:14px 16px;text-align:center}
   .stat .k{font-size:10px;color:#8b8b9c;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px}
-  .stat .v{font-size:22px;font-weight:900;color:#fff;text-shadow:0 0 14px rgba(255,0,60,.35);word-break:break-all}
+  .stat .v{font-size:22px;font-weight:900;color:#fff;word-break:break-all}
   .stat .v.red{color:#ff003c}
-  .stat .v.green{color:#38ef7d;text-shadow:0 0 14px rgba(56,239,125,.4)}
+  .stat .v.green{color:#38ef7d}
   .stat .v.small{font-size:14px;font-weight:700}
   .statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:12px}
-  @media(max-width:520px){.statgrid{grid-template-columns:1fr 1fr}}
 
-  .log{background:#000;border:1px solid rgba(255,0,60,.25);border-radius:14px;
-    padding:14px;height:340px;overflow-y:auto;font-family:'Courier New',monospace;
-    font-size:12px;line-height:1.75;box-shadow:inset 0 0 40px rgba(255,0,60,.08)}
-  .log::-webkit-scrollbar{width:8px}
-  .log::-webkit-scrollbar-track{background:#0a0a0f}
-  .log::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
+  .log{background:#000;border:1px solid rgba(255,0,60,.25);border-radius:14px;padding:14px;height:340px;overflow-y:auto;font-family:'Courier New',monospace;font-size:12px;line-height:1.75}
   .log .line{color:#9a9aab;border-bottom:1px dashed rgba(255,255,255,.04);padding:2px 0;word-break:break-all}
   .log .t{color:#ff5277;margin-right:8px}
   .log .ok{color:#38ef7d}
@@ -549,59 +512,47 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .log .info{color:#6bc6ff}
   .log .warn{color:#ffc655}
 
-  .progress{height:8px;background:rgba(5,5,10,.8);border-radius:99px;overflow:hidden;
-    border:1px solid rgba(255,0,60,.25);margin-top:12px}
-  .progress > div{height:100%;width:0%;
-    background:linear-gradient(90deg,#ff003c,#ff5277,#ff003c);
-    background-size:200% 100%;transition:width .4s ease;animation:shine 2s linear infinite}
-  @keyframes shine{0%{background-position:0 0}100%{background-position:200% 0}}
+  .progress{height:8px;background:rgba(5,5,10,.8);border-radius:99px;overflow:hidden;border:1px solid rgba(255,0,60,.25);margin-top:12px}
+  .progress > div{height:100%;width:0%;background:linear-gradient(90deg,#ff003c,#ff5277,#ff003c);transition:width .4s ease}
 
   .groups-toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
   .groups-toolbar button{width:auto;margin-top:0;padding:10px 16px;font-size:11px}
-  .groups-toolbar .count{font-size:12px;color:#8b8b9c;margin-left:auto;letter-spacing:1px}
-  .groups-list{
-    background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;
-    max-height:360px;overflow-y:auto;padding:8px;
-  }
-  .groups-list::-webkit-scrollbar{width:8px}
-  .groups-list::-webkit-scrollbar-track{background:#0a0a0f}
-  .groups-list::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
-  .group-item{
-    display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;
-    cursor:pointer;transition:.15s;border:1px solid transparent;
-  }
+  .groups-toolbar .count{font-size:12px;color:#8b8b9c;margin-left:auto}
+  .groups-list{background:rgba(5,5,10,.6);border:1px solid rgba(255,0,60,.2);border-radius:14px;max-height:360px;overflow-y:auto;padding:8px}
+  .group-item{display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:10px;cursor:pointer;border:1px solid transparent}
   .group-item:hover{background:rgba(255,0,60,.08);border-color:rgba(255,0,60,.25)}
   .group-item.selected{background:rgba(255,0,60,.14);border-color:#ff003c}
-  .group-item input[type=checkbox]{
-    width:18px;height:18px;accent-color:#ff003c;cursor:pointer;flex-shrink:0;
-  }
+  .group-item input[type=checkbox]{width:18px;height:18px;accent-color:#ff003c;cursor:pointer;flex-shrink:0}
   .group-info{flex:1;min-width:0}
-  .group-name{color:#f1f1f6;font-size:13px;font-weight:600;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .group-jid{color:#6b6b7a;font-size:11px;font-family:'Courier New',monospace;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
-  .group-meta{color:#ff5277;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0}
-
+  .group-name{color:#f1f1f6;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .group-jid{color:#6b6b7a;font-size:11px;font-family:'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .hidden{display:none!important}
-  .hint{font-size:11px;color:#6b6b7a;margin-top:8px;letter-spacing:.5px}
+  .hint{font-size:11px;color:#6b6b7a;margin-top:8px}
   .empty{padding:30px 20px;text-align:center;color:#6b6b7a;font-size:13px}
   .footer{text-align:center;color:#4b4b5a;font-size:11px;letter-spacing:3px;margin-top:30px;text-transform:uppercase}
-
-  .queue-box{
-    background:rgba(5,5,10,.7);border:1px solid rgba(255,0,60,.25);border-radius:12px;
-    padding:12px 14px;margin-top:8px;font-size:12px;color:#c3c3d1;
-    max-height:140px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.6;
-  }
-  .queue-box .qi{color:#6bc6ff;margin-right:8px}
 </style>
 </head>
 <body>
+
+<!-- Admin Password Modal Overlay -->
+<div id="loginOverlay">
+  <div class="login-card">
+    <h2>🔒 Admin Security</h2>
+    <div class="field">
+      <label>Enter Control Password</label>
+      <input id="adminPassInput" type="password" placeholder="Enter password..." />
+    </div>
+    <button onclick="verifyPassword()">Unlock Dashboard</button>
+    <div id="loginMsg" class="msg"></div>
+  </div>
+</div>
+
 <div class="streaks"><span></span><span></span><span></span><span></span></div>
 
 <div class="container">
   <div class="brand">
     <h1>9AMAN <span class="x">X</span> YAMDHUD</h1>
-    <p>Multi-Session WhatsApp Control Center</p>
+    <p>Secure Multi-Session WhatsApp Manager</p>
   </div>
 
   <div class="tabs">
@@ -633,8 +584,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div id="errBox" class="msg err hidden"></div>
     </div>
 
+    <!-- FIXED: Pairing card ab hamesha dikhega, chahe session paired ho ya na ho, taaki naya number/session link karna aasan ho -->
     <div class="card" id="pairCard">
-      <h2><span class="dot"></span>Pair WhatsApp</h2>
+      <h2><span class="dot"></span>Pair WhatsApp (New / Re-Link)</h2>
       <label>Phone Number (country code, no + or spaces)</label>
       <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
       <button id="pairBtn" onclick="startPair()">Get Pairing Code</button>
@@ -778,11 +730,47 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">9MAN X YAMDHUT © — Multi-Session WhatsApp Manager</div>
+  <div class="footer">9MAN X YAMDHUD © — Secure Multi-Session WhatsApp Manager</div>
 </div>
 
 <script>
+let authToken = localStorage.getItem('admin_token') || '';
 let currentSession = 'default';
+
+async function verifyPassword(){
+  const pass = document.getElementById('adminPassInput').value.trim();
+  const msg = document.getElementById('loginMsg');
+  try{
+    const res = await fetch('/api/login', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({password: pass})
+    });
+    const d = await res.json();
+    if(d.success){
+      authToken = d.token;
+      localStorage.setItem('admin_token', authToken);
+      document.getElementById('loginOverlay').style.display = 'none';
+      initApp();
+    } else {
+      showMsg(msg, 'err', 'Incorrect Password');
+    }
+  }catch(e){showMsg(msg, 'err', e.message);}
+}
+
+// Check saved token on load
+if(authToken){
+  fetch('/api/verify', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({token: authToken})
+  }).then(r=>r.json()).then(d=>{
+    if(d.success){
+      document.getElementById('loginOverlay').style.display = 'none';
+      initApp();
+    } else {
+      localStorage.removeItem('admin_token');
+    }
+  }).catch(()=>{});
+}
 
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
@@ -794,7 +782,7 @@ function clearLog(){document.getElementById('logBox').innerHTML='';}
 
 async function loadSessions(){
   try{
-    const res = await fetch('/api/sessions');
+    const res = await fetch('/api/sessions', {headers:{'x-admin-token': authToken}});
     const d = await res.json();
     if(d.sessions){
       const opts = d.sessions.map(s => '<option value="'+s+'" '+(s===currentSession?'selected':'')+'>'+s+'</option>').join('');
@@ -851,7 +839,11 @@ async function startPair(){
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
-    const res=await fetch('/api/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({phone, session: currentSession})});
+    const res=await fetch('/api/pair',{
+      method:'POST', 
+      headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
+      body:JSON.stringify({phone, session: currentSession})
+    });
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
@@ -865,7 +857,11 @@ async function startPair(){
 async function logout(){
   if(!confirm('Logout session "'+currentSession+'"? Auth will be deleted.'))return;
   try{
-    await fetch('/api/logout',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session: currentSession})});
+    await fetch('/api/logout',{
+      method:'POST',
+      headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
+      body:JSON.stringify({session: currentSession})
+    });
     await loadSessions();
     onSessionChange();
   }catch(e){alert(e.message);}
@@ -881,7 +877,7 @@ async function fetchGroups(){
   btn.disabled=true;btn.textContent='Fetching...';
   listEl.innerHTML='<div class="empty">Loading groups...</div>';
   try{
-    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession));
+    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed to fetch');
     allGroups = d.groups || [];
@@ -912,7 +908,6 @@ function renderDashGroups(){
         '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
         '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
       '</div>'+
-      '<div class="group-meta">'+(g.size?g.size+' members':'')+'</div>'+
     '</label>';
   }).join('');
 }
@@ -934,14 +929,13 @@ async function sendToSelectedGroups(){
   btn.disabled=true;btn.textContent='Sending...';showMsg(box,'','');
   try{
     const res=await fetch('/api/send-groups',{
-      method:'POST',headers:{'Content-Type':'application/json'},
+      method:'POST',headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
       body:JSON.stringify({session: currentSession, groupIds:[...dashSelected], message:msg})
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
     showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups'+(d.failed?' ('+d.failed+' failed)':''));
     log('ok','Group send: '+d.sent+'/'+d.total+' success');
-    if(d.errors&&d.errors.length) d.errors.forEach(e=>log('err',e));
   }catch(e){showMsg(box,'err',e.message);log('err','Group send: '+e.message);}
   finally{btn.disabled=false;btn.textContent='Send to Selected Groups';}
 }
@@ -966,7 +960,6 @@ function renderBulkGroups(){
         '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
         '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
       '</div>'+
-      '<div class="group-meta">'+(g.size?g.size+' members':'')+'</div>'+
     '</label>';
   }).join('');
 }
@@ -1006,8 +999,8 @@ async function startServer(){
   if(delay<3) delay=3;
   const lastHater=document.getElementById('lastHaterInput').value.trim();
 
-  if(!file){alert('Please upload a .txt file — each line will be a separate message');return;}
-  if(bulkSelected.size===0){alert('Please select at least one group as target');return;}
+  if(!file){alert('Please upload a .txt file');return;}
+  if(bulkSelected.size===0){alert('Please select at least one group');return;}
 
   const startBtn=document.getElementById('startBtn');
   const stopBtn=document.getElementById('stopBtn');
@@ -1021,9 +1014,8 @@ async function startServer(){
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
 
-  log('info','Starting bulk task for session: '+currentSession);
   try{
-    const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
+    const res=await fetch('/api/bulk/start',{method:'POST', headers:{'x-admin-token': authToken}, body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','Task started — '+d.total+' messages in queue, '+d.totalTargets+' targets');
@@ -1038,7 +1030,10 @@ async function startServer(){
 
 async function stopTask(){
   try{
-    const res=await fetch('/api/bulk/stop',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({session: currentSession})});
+    const res=await fetch('/api/bulk/stop',{
+      method:'POST',headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
+      body:JSON.stringify({session: currentSession})
+    });
     const d=await res.json();
     if(d.success) log('warn','Stop requested — task will halt immediately');
     else log('err',d.error||'No task running');
@@ -1047,7 +1042,7 @@ async function stopTask(){
 
 async function pollStatus(){
   try{
-    const res=await fetch('/api/status?session='+encodeURIComponent(currentSession));
+    const res=await fetch('/api/status?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
     const d=await res.json();
     const badge=document.getElementById('badge');
     const infoPhone=document.getElementById('infoPhone');
@@ -1055,7 +1050,6 @@ async function pollStatus(){
     const errBox=document.getElementById('errBox');
     const codeSection=document.getElementById('codeSection');
     const codeValue=document.getElementById('codeValue');
-    const pairCard=document.getElementById('pairCard');
     const phoneInput=document.getElementById('phoneInput');
     const pairBtn=document.getElementById('pairBtn');
 
@@ -1063,19 +1057,17 @@ async function pollStatus(){
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
-      codeSection.classList.add('hidden');pairCard.classList.add('hidden');
+      codeSection.classList.add('hidden');
+      phoneInput.disabled=false;pairBtn.disabled=false; // FIXED: Paired hone ke baad bhi number input khula rahega taaki naya/dusra number link kar sakein
     }else if(d.code){
       badge.textContent='Waiting for pairing';badge.className='badge b-wait';
       codeSection.classList.remove('hidden');
       codeValue.textContent=d.code;codeValue.classList.remove('loading');
-      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else if(d.connecting){
       badge.textContent='Connecting';badge.className='badge b-wait';
-      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else{
       badge.textContent='Idle';badge.className='badge b-idle';
-      phoneInput.disabled=false;pairBtn.disabled=false;
-      codeSection.classList.add('hidden');pairCard.classList.remove('hidden');
+      codeSection.classList.add('hidden');
     }
     if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
     else{errBox.classList.add('hidden');}
@@ -1085,7 +1077,7 @@ async function pollStatus(){
 let lastLogId=0;
 async function pollStats(){
   try{
-    const res=await fetch('/api/bulk/status?session='+encodeURIComponent(currentSession));
+    const res=await fetch('/api/bulk/status?session='+encodeURIComponent(currentSession), {headers:{'x-admin-token': authToken}});
     const d=await res.json();
 
     const statusEl=document.getElementById('statStatus');
@@ -1129,34 +1121,65 @@ async function pollStats(){
   }catch(e){console.error(e);}
 }
 
-// Initialize session list on load
-loadSessions().then(()=>{
-  setInterval(pollStatus,2000);
-  setInterval(pollStats,1500);
-  pollStatus();
-  pollStats();
-});
+function initApp(){
+  loadSessions().then(()=>{
+    setInterval(pollStatus,2000);
+    setInterval(pollStats,1500);
+    pollStatus();
+    pollStats();
+  });
+}
 </script>
 </body>
 </html>`;
 
 // ============================================================
-// Express app with Multi-Session support
+// Express app with Admin Authentication Middleware
 // ============================================================
 const app = express();
 app.use(express.json());
+
+// Simple token storage in memory
+const activeTokens = new Set();
+
+app.post('/api/login', (req, res) => {
+  const { password } = req.body;
+  if (password === ADMIN_PASSWORD) {
+    const token = 'token_' + Math.random().toString(36).substring(2) + Date.now();
+    activeTokens.add(token);
+    return res.json({ success: true, token });
+  }
+  res.status(401).json({ success: false, error: 'Invalid password' });
+});
+
+app.post('/api/verify', (req, res) => {
+  const { token } = req.body;
+  if (token && activeTokens.has(token)) {
+    return res.json({ success: true });
+  }
+  res.json({ success: false });
+});
+
+// Middleware to protect all management routes
+const requireAuth = (req, res, next) => {
+  const token = req.headers['x-admin-token'];
+  if (token && activeTokens.has(token)) {
+    return next();
+  }
+  res.status(401).json({ success: false, error: 'Unauthorized access' });
+};
 
 app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
-app.get('/api/sessions', (req, res) => {
+app.get('/api/sessions', requireAuth, (req, res) => {
   const list = Object.keys(sessions);
   if (!list.includes('default')) list.unshift('default');
   res.json({ success: true, sessions: list });
 });
 
-app.post('/api/pair', async (req, res) => {
+app.post('/api/pair', requireAuth, async (req, res) => {
   try {
     const { phone, session } = req.body;
     const sess = getOrCreateSession(session);
@@ -1164,17 +1187,12 @@ app.post('/api/pair', async (req, res) => {
     if (!phone || !/^\d{10,15}$/.test(phone)) {
       return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
-    if (sess.isPaired) return res.status(400).json({ success: false, error: 'Already paired. Logout first.' });
     if (sess.isConnecting) {
-      return res.status(400).json({
-        success: false,
-        error: 'Connection in progress for session ' + sess.name,
-      });
+      return res.status(400).json({ success: false, error: 'Connection already in progress for session ' + sess.name });
     }
     if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
 
     sess.connect(phone).catch((e) => {
-      console.error('Connect failed:', e.message);
       sess.lastError = e.message;
     });
 
@@ -1184,7 +1202,7 @@ app.post('/api/pair', async (req, res) => {
   }
 });
 
-app.get('/api/status', (req, res) => {
+app.get('/api/status', requireAuth, (req, res) => {
   const sessName = req.query.session || 'default';
   const sess = getOrCreateSession(sessName);
   res.json({
@@ -1197,7 +1215,7 @@ app.get('/api/status', (req, res) => {
   });
 });
 
-app.get('/api/groups', async (req, res) => {
+app.get('/api/groups', requireAuth, async (req, res) => {
   try {
     const sessName = req.query.session || 'default';
     const sess = getOrCreateSession(sessName);
@@ -1212,11 +1230,6 @@ app.get('/api/groups', async (req, res) => {
     try {
       sess.getGroupsFromStore().forEach((g) => {
         if (!map.has(g.id)) map.set(g.id, g);
-        else {
-          const existing = map.get(g.id);
-          if (!existing.name && g.name) existing.name = g.name;
-          if (!existing.size && g.size) existing.size = g.size;
-        }
       });
     } catch (_) {}
 
@@ -1245,7 +1258,7 @@ app.get('/api/groups', async (req, res) => {
   }
 });
 
-app.post('/api/send-groups', async (req, res) => {
+app.post('/api/send-groups', requireAuth, async (req, res) => {
   try {
     const { session, groupIds, message } = req.body;
     const sess = getOrCreateSession(session);
@@ -1276,7 +1289,7 @@ app.post('/api/send-groups', async (req, res) => {
   }
 });
 
-app.post('/api/logout', async (req, res) => {
+app.post('/api/logout', requireAuth, async (req, res) => {
   try {
     const { session } = req.body;
     const sessName = session || 'default';
@@ -1291,10 +1304,7 @@ app.post('/api/logout', async (req, res) => {
   }
 });
 
-// ============================================================
-// BULK START PER SESSION
-// ============================================================
-app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
+app.post('/api/bulk/start', requireAuth, upload.single('file'), async (req, res) => {
   try {
     const { session, hater, delay, lastHater, groupIds } = req.body;
     const sess = getOrCreateSession(session);
@@ -1379,7 +1389,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   }
 });
 
-app.post('/api/bulk/stop', (req, res) => {
+app.post('/api/bulk/stop', requireAuth, (req, res) => {
   const { session } = req.body;
   const sess = getOrCreateSession(session);
   if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
@@ -1388,7 +1398,7 @@ app.post('/api/bulk/stop', (req, res) => {
   res.json({ success: true });
 });
 
-app.get('/api/bulk/status', (req, res) => {
+app.get('/api/bulk/status', requireAuth, (req, res) => {
   const sessName = req.query.session || 'default';
   const sess = getOrCreateSession(sessName);
   res.json({
@@ -1414,7 +1424,7 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Multi-Session Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🌐 Secure Multi-Session Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.on('SIGTERM', () => process.exit(0));
