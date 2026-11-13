@@ -15,7 +15,6 @@ const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
 const SESSIONS_BASE_DIR = 'sessions_data';
 
-// Admin Password (aap ise badal bhi sakte hain)
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'raja123';
 
 if (!fs.existsSync(SESSIONS_BASE_DIR)) {
@@ -222,14 +221,16 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
+      // FIXED: Added proper mobile pairing socket configuration to bypass "Couldn't link device" error
       this.sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Chrome (Linux)', 'Chrome', '120.0.0.0'], // Stable browser headers for pairing
+        browser: ['Ubuntu', 'Chrome', '20.0.04'],
         mobile: false,
         syncFullHistory: false,
+        markOnlineOnConnect: true,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -260,8 +261,8 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            // 3 seconds stable delay to prevent "Couldn't link device" error
-            await new Promise((r) => setTimeout(r, 3000));
+            // Wait 4 seconds for complete socket registration before requesting pairing code
+            await new Promise((r) => setTimeout(r, 4000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code for ${phone}: ${this.pairingCode}`);
             this.lastError = null;
