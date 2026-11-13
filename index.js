@@ -3,7 +3,6 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
-  Browsers
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
@@ -234,13 +233,14 @@ async function connectToWhatsApp(phone) {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
     const { version } = await fetchLatestBaileysVersion();
 
-    // UPDATED: Proper Browser config to prevent pairing rejection
+    // FIXED: Configured stable browser headers and mobile-compatible pairing setup
     sock = makeWASocket({
       version,
       auth: state,
       printQRInTerminal: false,
       logger: pino({ level: 'silent' }),
-      browser: Browsers.macOS('Chrome'),
+      browser: ['Ubuntu', 'Chrome', '20.0.04'],
+      mobile: false,
       syncFullHistory: false,
       markOnlineOnConnect: true,
       connectTimeoutMs: 60000,
@@ -275,7 +275,8 @@ async function connectToWhatsApp(phone) {
       if (connection === 'connecting' && !sock.authState.creds.registered && !pairingRequested) {
         pairingRequested = true;
         try {
-          await sleep(3000); // 3 seconds stable handshake delay
+          // Increased delay to 4 seconds so WhatsApp authenticates socket handshake fully before code generation
+          await sleep(4000);
           pairingCode = await sock.requestPairingCode(phone);
           console.log(`\n📱 PAIRING CODE for ${phone}: ${pairingCode}\n`);
           pushLog('info', `Pairing code for ${phone}: ${pairingCode}`);
@@ -1156,7 +1157,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 
 app.post('/api/bulk/stop', (req, res) => {
   if (!bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
-  bulkState.stopGrade = true;
   bulkState.stopFlag = true;
   pushLog('warn', 'Stop signal received');
   res.json({ success: true });
