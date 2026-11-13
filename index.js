@@ -11,11 +11,8 @@ const fs = require('fs');
 const path = require('path');
 const multer = require('multer');
 
-// Render par uploads folder auto create hoga
 const uploadsDir = path.join(__dirname, 'uploads');
-if (!fs.existsSync(uploadsDir)) {
-  fs.mkdirSync(uploadsDir, { recursive: true });
-}
+if (!fs.existsSync(uploadsDir)) fs.mkdirSync(uploadsDir, { recursive: true });
 
 const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
@@ -28,8 +25,7 @@ const SEND_RETRY = 1;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 30000;
 
-// ============ SESSIONS ============
-const sessions = new Map(); // id -> state
+const sessions = new Map();
 
 function getAuthDir(id) {
   return id === 'default' ? AUTH_BASE : `${AUTH_BASE}_${id}`;
@@ -37,17 +33,9 @@ function getAuthDir(id) {
 
 function newSessionState(id) {
   return {
-    id,
-    sock: null,
-    pairingCode: null,
-    isPaired: false,
-    phone: null,
-    pairingRequested: false,
-    isConnecting: false,
-    lastError: null,
-    connectedAt: null,
-    groupsCache: {},
-    authDir: getAuthDir(id),
+    id, sock: null, pairingCode: null, isPaired: false, phone: null,
+    pairingRequested: false, isConnecting: false, lastError: null,
+    connectedAt: null, groupsCache: {}, authDir: getAuthDir(id),
   };
 }
 
@@ -56,35 +44,16 @@ function ensureSession(id) {
   return sessions.get(id);
 }
 
-// ============ BULK STATE ============
 const bulkState = {
-  running: false,
-  stopFlag: false,
-  sessionId: null,
-  sent: 0,
-  failed: 0,
-  tasks: 0,
-  total: 0,
-  remaining: 0,
-  cycle: 0,
-  msgIndex: 0,
-  targetIndex: 0,
-  totalTargets: 0,
-  currentMessage: '',
-  currentTarget: '',
-  targets: [],
-  messages: [],
-  delayMs: DEFAULT_DELAY_SECONDS * 1000,
-  logs: [],
-  logId: 0,
-  startedAt: null,
-  workerAlive: false,
-  lastBeat: 0,
+  running: false, stopFlag: false, sessionId: null, sent: 0, failed: 0,
+  tasks: 0, total: 0, remaining: 0, cycle: 0, msgIndex: 0, targetIndex: 0,
+  totalTargets: 0, currentMessage: '', currentTarget: '', targets: [],
+  messages: [], delayMs: DEFAULT_DELAY_SECONDS * 1000, logs: [], logId: 0,
+  startedAt: null, workerAlive: false, lastBeat: 0,
 };
 
 let serverStartTime = Date.now();
 
-// ============ UTILS ============
 function pushLog(type, msg) {
   bulkState.logs.push({ id: ++bulkState.logId, ts: Date.now(), type, msg });
   if (bulkState.logs.length > 500) bulkState.logs.splice(0, bulkState.logs.length - 500);
@@ -94,10 +63,7 @@ function pushLog(type, msg) {
 
 function formatUptime(ms) {
   const s = Math.floor(ms / 1000);
-  const h = String(Math.floor(s / 3600)).padStart(2, '0');
-  const m = String(Math.floor((s % 3600) / 60)).padStart(2, '0');
-  const sec = String(s % 60).padStart(2, '0');
-  return `${h}:${m}:${sec}`;
+  return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
 }
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -105,9 +71,9 @@ function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 function getGroupsFromStore(s) {
   const out = [];
   try {
-    if (s && s.sock && s.sock.store && s.sock.store.groupMetadata) {
+    if (s?.sock?.store?.groupMetadata) {
       s.sock.store.groupMetadata.forEach((v) => {
-        out.push({ id: v.id, name: v.subject || '', size: v.participants ? v.participants.length : 0 });
+        out.push({ id: v.id, name: v.subject || '', size: v.participants?.length || 0 });
       });
     }
   } catch (_) {}
@@ -125,15 +91,13 @@ function parseMessagesFile(filePath) {
   const out = [];
   content.split(/\r?\n/).forEach((line) => {
     const t = line.trim();
-    if (!t) return;
-    if (seen.has(t)) return;
+    if (!t || seen.has(t)) return;
     seen.add(t);
     out.push(t);
   });
   return out;
 }
 
-// ============ SAFE SEND ============
 async function safeSend(jid, text) {
   const s = sessions.get(bulkState.sessionId);
   if (!s || !s.sock) throw new Error('session not ready');
@@ -154,7 +118,6 @@ async function safeSend(jid, text) {
   return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
 }
 
-// ============ WORKER ============
 async function runWorker() {
   if (bulkState.workerAlive) return;
   bulkState.workerAlive = true;
@@ -162,78 +125,49 @@ async function runWorker() {
 
   try {
     while (!bulkState.stopFlag) {
-      if (!isSocketReady()) {
-        bulkState.lastBeat = Date.now();
-        await sleep(3000);
-        continue;
-      }
-
+      if (!isSocketReady()) { bulkState.lastBeat = Date.now(); await sleep(3000); continue; }
       for (let mi = 0; mi < bulkState.messages.length && !bulkState.stopFlag; mi++) {
         const msg = bulkState.messages[mi];
         bulkState.msgIndex = mi;
         bulkState.currentMessage = msg;
-
         for (let ti = 0; ti < bulkState.targets.length && !bulkState.stopFlag; ti++) {
           const t = bulkState.targets[ti];
           bulkState.targetIndex = ti;
           bulkState.currentTarget = t.label;
           bulkState.lastBeat = Date.now();
-
-          if (!isSocketReady()) {
-            pushLog('warn', 'Socket temporarily unavailable — waiting to resume');
-            break;
-          }
-
+          if (!isSocketReady()) { pushLog('warn', 'Socket dropped'); break; }
           try {
             const res = await safeSend(t.jid, msg);
-            if (res.ok) {
-              bulkState.sent++;
-              pushLog('ok', `Cycle ${bulkState.cycle + 1} | Msg ${mi + 1}/${bulkState.messages.length} → ${t.label}`);
-            } else {
-              bulkState.failed++;
-              pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
-            }
-          } catch (e) {
-            bulkState.failed++;
-            pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
-          }
-
+            if (res.ok) { bulkState.sent++; pushLog('ok', `Cycle ${bulkState.cycle + 1} | Msg ${mi + 1}/${bulkState.messages.length} → ${t.label}`); }
+            else { bulkState.failed++; pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`); }
+          } catch (e) { bulkState.failed++; pushLog('err', `Send error → ${t.label}: ${e.message}`); }
           bulkState.remaining = bulkState.messages.length - (mi + 1);
-
           if (!bulkState.stopFlag) await sleep(bulkState.delayMs);
         }
-
         if (!isSocketReady() && !bulkState.stopFlag) break;
       }
-
       if (!bulkState.stopFlag) {
         bulkState.cycle++;
         bulkState.remaining = bulkState.messages.length;
         bulkState.msgIndex = 0;
         bulkState.targetIndex = 0;
-        pushLog('info', `Cycle ${bulkState.cycle} completed — restarting from Message 1`);
+        pushLog('info', `Cycle ${bulkState.cycle} completed`);
       }
     }
   } catch (loopErr) {
     pushLog('err', 'Worker crashed: ' + loopErr.message);
     if (!bulkState.stopFlag) {
-      pushLog('warn', 'Worker auto-restarting in 3s...');
       bulkState.workerAlive = false;
       bulkState.running = true;
-      setTimeout(() => { runWorker(); }, 3000);
+      setTimeout(() => runWorker(), 3000);
       return;
     }
   } finally {
     if (bulkState.stopFlag) {
-      bulkState.running = false;
-      bulkState.stopFlag = false;
-      bulkState.workerAlive = false;
-      bulkState.currentMessage = '';
-      bulkState.currentTarget = '';
+      bulkState.running = false; bulkState.stopFlag = false; bulkState.workerAlive = false;
+      bulkState.currentMessage = ''; bulkState.currentTarget = '';
       pushLog('info', `Task stopped — Sent: ${bulkState.sent}, Failed: ${bulkState.failed}, Cycles: ${bulkState.cycle}`);
-    } else {
-      bulkState.workerAlive = false;
-    }
+    } else bulkState.workerAlive = false;
   }
 }
 
@@ -244,12 +178,16 @@ setInterval(() => {
   }
 }, WATCHDOG_INTERVAL_MS);
 
-// ============ CONNECT PER SESSION ============
+// =============== FIXED CONNECT SESSION ===============
 async function connectSession(sessionId, phone) {
   const s = ensureSession(sessionId);
   if (!phone) throw new Error('Phone number required');
-  if (s.isConnecting) throw new Error('Connection already in progress for ' + sessionId);
-  if (s.isPaired) throw new Error('Session already paired');
+  if (s.isPaired) throw new Error('Already paired');
+
+  // ALWAYS clean auth folder for fresh pairing
+  if (fs.existsSync(s.authDir)) {
+    try { fs.rmSync(s.authDir, { recursive: true, force: true }); } catch (_) {}
+  }
 
   s.isConnecting = true;
   s.phone = phone;
@@ -265,7 +203,7 @@ async function connectSession(sessionId, phone) {
       const v = await fetchLatestBaileysVersion();
       version = v.version;
     } catch (e) {
-      version = [2, 3000, 1015901307]; // Fallback if fetch fails
+      version = [2, 3000, 1015901307];
     }
 
     s.sock = makeWASocket({
@@ -280,50 +218,49 @@ async function connectSession(sessionId, phone) {
 
     s.sock.ev.on('creds.update', saveCreds);
 
+    // ---- CRITICAL FIX: Request pairing code DIRECTLY (not in event handler) ----
+    if (!state.creds.registered) {
+      setTimeout(async () => {
+        try {
+          console.log(`\n[${sessionId}] 🔑 Requesting pairing code for ${phone}...\n`);
+          pushLog('info', `[${sessionId}] Requesting pairing code...`);
+          const code = await s.sock.requestPairingCode(phone);
+          s.pairingCode = code;
+          s.pairingRequested = true;
+          console.log(`\n[${sessionId}] ✅ PAIRING CODE: ${code}\n`);
+          pushLog('ok', `[${sessionId}] Pairing code: ${code}`);
+        } catch (e) {
+          console.error(`[${sessionId}] ❌ Pairing request failed:`, e.message);
+          s.lastError = 'Pairing failed: ' + e.message;
+          pushLog('err', `[${sessionId}] Pairing failed: ${e.message}`);
+        }
+      }, 3000);
+    }
+
     s.sock.ev.on('groups.upsert', (groups) => {
       groups.forEach((g) => {
-        s.groupsCache[g.id] = {
-          id: g.id, name: g.subject || '', size: g.participants ? g.participants.length : 0,
-        };
+        s.groupsCache[g.id] = { id: g.id, name: g.subject || '', size: g.participants?.length || 0 };
       });
     });
 
     s.sock.ev.on('groups.update', (updates) => {
       updates.forEach((u) => {
-        if (s.groupsCache[u.id]) {
-          if (u.subject) s.groupsCache[u.id].name = u.subject;
-        } else if (u.id) {
-          s.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
-        }
+        if (s.groupsCache[u.id] && u.subject) s.groupsCache[u.id].name = u.subject;
+        else if (u.id) s.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
       });
     });
 
     s.sock.ev.on('connection.update', async (update) => {
       const { connection, lastDisconnect } = update;
 
-      if (connection === 'connecting' && !s.sock.authState.creds.registered && !s.pairingRequested) {
-        s.pairingRequested = true;
-        try {
-          await sleep(1000);
-          s.pairingCode = await s.sock.requestPairingCode(phone);
-          console.log(`\n📱 [${sessionId}] PAIRING CODE for ${phone}: ${s.pairingCode}\n`);
-          pushLog('info', `[${sessionId}] Pairing code for ${phone}: ${s.pairingCode}`);
-          s.lastError = null;
-        } catch (err) {
-          s.lastError = err.message;
-          s.pairingCode = null;
-          s.pairingRequested = false;
-          s.isConnecting = false;
-        }
-      }
-
       if (connection === 'open') {
         s.isPaired = true;
+        s.isConnecting = false;
         s.pairingCode = null;
         s.pairingRequested = false;
-        s.isConnecting = false;
         s.connectedAt = new Date().toISOString();
         s.lastError = null;
+        console.log(`[${sessionId}] ✅ CONNECTED!`);
         pushLog('ok', `[${sessionId}] Connected (${phone})`);
 
         setTimeout(async () => {
@@ -331,9 +268,7 @@ async function connectSession(sessionId, phone) {
             if (typeof s.sock.groupFetchAllParticipating === 'function') {
               const all = await s.sock.groupFetchAllParticipating();
               Object.values(all).forEach((g) => {
-                s.groupsCache[g.id] = {
-                  id: g.id, name: g.subject || '', size: g.participants ? g.participants.length : 0,
-                };
+                s.groupsCache[g.id] = { id: g.id, name: g.subject || '', size: g.participants?.length || 0 };
               });
             }
             const store = getGroupsFromStore(s);
@@ -345,7 +280,7 @@ async function connectSession(sessionId, phone) {
         }, 3000);
 
         if (bulkState.running && bulkState.sessionId === sessionId && !bulkState.workerAlive) {
-          pushLog('info', `[${sessionId}] Reconnect — resuming bulk worker`);
+          pushLog('info', `[${sessionId}] Reconnect — resuming worker`);
           runWorker();
         }
       }
@@ -353,38 +288,33 @@ async function connectSession(sessionId, phone) {
       if (connection === 'close') {
         const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
         const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-        pushLog('warn', `[${sessionId}] Connection closed (code ${statusCode})`);
+        pushLog('warn', `[${sessionId}] Connection closed (${statusCode})`);
+        
+        const wasPaired = s.isPaired;
         s.isPaired = false;
         s.isConnecting = false;
 
-        if (bulkState.running && bulkState.sessionId === sessionId) {
-          pushLog('warn', `[${sessionId}] Socket dropped — worker will auto-resume`);
-        }
-
-        if (shouldReconnect && s.phone) {
-          s.pairingRequested = false;
+        // If not paired yet and not logged out, retry
+        if (!wasPaired && shouldReconnect && s.phone && !s.pairingCode) {
           setTimeout(() => connectSession(sessionId, s.phone).catch(console.error), 3000);
         } else if (statusCode === DisconnectReason.loggedOut) {
           s.pairingCode = null;
-          s.pairingRequested = false;
           s.phone = null;
-          if (bulkState.running && bulkState.sessionId === sessionId) {
-            bulkState.stopFlag = true;
-            pushLog('warn', `[${sessionId}] Logged out — stopping bulk worker`);
-          }
+          if (bulkState.running && bulkState.sessionId === sessionId) bulkState.stopFlag = true;
+        } else if (wasPaired && shouldReconnect && s.phone) {
+          setTimeout(() => connectSession(sessionId, s.phone).catch(console.error), 3000);
         }
       }
     });
   } catch (err) {
     s.isConnecting = false;
     s.lastError = err.message;
+    console.error(`[${sessionId}] Connect error:`, err.message);
     throw err;
   }
 }
 
-// ============================================================
-// EMBEDDED HTML — CUTE THEME
-// ============================================================
+// ============ EMBEDDED HTML ============
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -526,7 +456,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .badge-run{background:linear-gradient(135deg,#ff6b9d,#c084fc);color:#fff;border:2px solid transparent;animation:pulse 1.8s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:.6}}
 
-  /* Session cards */
   .session-card{
     background:linear-gradient(135deg,rgba(255,255,255,.95),rgba(250,245,255,.95));
     border:2px solid #ffc4d9;border-radius:20px;padding:18px;margin-bottom:14px;
@@ -555,7 +484,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     border-radius:14px;padding:12px 16px;font-size:12px;line-height:2;color:#6b7280;
   }
   .connecting-msg{color:#a78bfa;font-size:13px;font-weight:600;text-align:center;padding:14px}
-  .phone-input{margin-bottom:0}
   .btn-row{display:flex;gap:8px}
   .btn-row button{flex:1;padding:10px 16px;font-size:11px;margin-top:0}
 
@@ -568,7 +496,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     border-radius:16px;max-height:340px;overflow-y:auto;padding:8px;
   }
   .groups-list::-webkit-scrollbar{width:8px}
-  .groups-list::-webkit-scrollbar-track{background:transparent}
   .groups-list::-webkit-scrollbar-thumb{background:linear-gradient(#ff6b9d,#c084fc);border-radius:8px}
   .group-item{
     display:flex;align-items:center;gap:12px;padding:10px 12px;border-radius:12px;
@@ -671,10 +598,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       
       <div id="pairMsg" class="msg"></div>
 
-      <!-- LIVE PAIRING DASHBOARD -->
       <div id="livePairDashboard" class="hidden" style="margin-top: 20px; padding: 20px; background: rgba(255,255,255,0.9); border: 2px dashed #ff6b9d; border-radius: 16px; text-align: center;">
         <h3 style="color: #7c3aed; font-size: 14px; margin-bottom: 10px;">📡 LIVE PAIRING DASHBOARD</h3>
         <div id="liveStatus" style="font-size: 13px; color: #6b7280; margin-bottom: 15px; font-weight: 600;">Connecting to WhatsApp servers...</div>
+        <div id="liveTimer" style="font-size: 11px; color: #a78bfa; margin-bottom: 10px;"></div>
         
         <div id="liveCodeBox" class="pair-code-box hidden">
           <div class="code-label">✨ Your Pairing Code ✨</div>
@@ -840,14 +767,13 @@ function log(type,msg){
   while(box.children.length>500) box.removeChild(box.firstChild);
 }
 
-// ============ SESSIONS ============
 var currentSessions=[];
 var lastSessionsJson='';
 
 async function loadSessions(){
   try{
     var res=await fetch('/api/sessions');
-    if(!res.ok) throw new Error('Server error: '+res.status);
+    if(!res.ok) throw new Error('Server: '+res.status);
     var d=await res.json();
     var json=JSON.stringify(d.sessions);
     if(json===lastSessionsJson) return;
@@ -857,7 +783,7 @@ async function loadSessions(){
     updateSessionDropdowns();
   }catch(e){
     console.error(e);
-    document.getElementById('sessionsList').innerHTML='<div class="empty" style="color:#dc2626">Server connecting... (Refresh page if stuck)</div>';
+    document.getElementById('sessionsList').innerHTML='<div class="empty" style="color:#dc2626">Server se connect nahi ho raha. Render logs check karein.</div>';
   }
 }
 
@@ -879,38 +805,20 @@ function renderSessionCard(s){
 
   var body='';
   if(s.paired){
-    body='<div class="sess-info">'+
-      '<div>📱 '+escapeHtml(s.phone||'—')+'</div>'+
-      '<div>🕐 '+(s.connectedAt?new Date(s.connectedAt).toLocaleString():'—')+'</div>'+
-      '</div>'+
-      '<div class="btn-row">'+
-      '<button class="ghost" onclick="logoutSession(\''+s.id+'\')">🚪 Logout</button>'+
-      '</div>';
+    body='<div class="sess-info"><div>📱 '+escapeHtml(s.phone||'—')+'</div><div>🕐 '+(s.connectedAt?new Date(s.connectedAt).toLocaleString():'—')+'</div></div>'+
+      '<div class="btn-row"><button class="ghost" onclick="logoutSession(\''+s.id+'\')">🚪 Logout</button></div>';
   }else if(s.code){
-    body='<div class="connecting-msg">⏳ Waiting for link... Code upar button ke niche hai. 💫</div>'+
-      '<div class="btn-row">'+
-      '<button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Cancel</button>'+
-      '</div>';
+    body='<div class="connecting-msg">⏳ Code upar button ke niche hai. 💫</div>'+
+      '<div class="btn-row"><button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Cancel</button></div>';
   }else if(s.connecting){
-    body='<div class="connecting-msg">⏳ Generating pairing code... 💫</div>';
+    body='<div class="connecting-msg">⏳ Connecting to WhatsApp... 💫</div>';
   }else{
-    body='<div class="connecting-msg">Session ready. Logout to reset.</div>'+
-      '<div class="btn-row">'+
-      '<button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Delete</button>'+
-      '</div>';
+    body='<div class="btn-row"><button class="ghost" onclick="deleteSession(\''+s.id+'\')">🗑️ Delete</button></div>';
   }
 
-  if(s.error){
-    body+='<div class="msg err" style="display:block">⚠️ '+escapeHtml(s.error)+'</div>';
-  }
+  if(s.error) body+='<div class="msg err" style="display:block">⚠️ '+escapeHtml(s.error)+'</div>';
 
-  return '<div class="session-card">'+
-    '<div class="session-head">'+
-    '<div class="session-name">💫 '+escapeHtml(s.id)+'</div>'+
-    '<span class="badge '+badgeClass+'">'+status+'</span>'+
-    '</div>'+
-    '<div class="session-body">'+body+'</div>'+
-    '</div>';
+  return '<div class="session-card"><div class="session-head"><div class="session-name">💫 '+escapeHtml(s.id)+'</div><span class="badge '+badgeClass+'">'+status+'</span></div><div class="session-body">'+body+'</div></div>';
 }
 
 async function startPair(){
@@ -919,6 +827,7 @@ async function startPair(){
   var msgEl = document.getElementById('pairMsg');
   var dash = document.getElementById('livePairDashboard');
   var statusEl = document.getElementById('liveStatus');
+  var timerEl = document.getElementById('liveTimer');
   var codeBox = document.getElementById('liveCodeBox');
   var codeVal = document.getElementById('displayCode');
   var errBox = document.getElementById('liveErrorBox');
@@ -929,13 +838,19 @@ async function startPair(){
   }
   
   btn.disabled = true; 
-  btn.textContent = 'Generating Code...';
+  btn.textContent = 'Generating...';
   showMsg(msgEl, '', '');
   dash.classList.remove('hidden');
   codeBox.classList.add('hidden');
   errBox.classList.add('hidden');
-  statusEl.textContent = 'Requesting code from WhatsApp...';
+  statusEl.textContent = 'Creating session...';
   statusEl.style.color = '#a78bfa';
+
+  var startTime = Date.now();
+  var timerInterval = setInterval(function(){
+    var elapsed = Math.floor((Date.now() - startTime) / 1000);
+    timerEl.textContent = 'Elapsed: ' + elapsed + 's';
+  }, 1000);
   
   try {
     var res = await fetch('/api/pair-new', {
@@ -944,15 +859,17 @@ async function startPair(){
       body:JSON.stringify({phone:phone})
     });
     var d = await res.json();
-    
     if(!d.success) throw new Error(d.error||'Failed');
+    
+    statusEl.textContent = 'Waiting for WhatsApp...';
     
     let attempts = 0;
     let interval = setInterval(async () => {
       attempts++;
-      if(attempts > 40) { // 40 seconds timeout
+      if(attempts > 60) {
         clearInterval(interval);
-        statusEl.textContent = 'Timed out. Please try again.';
+        clearInterval(timerInterval);
+        statusEl.textContent = '❌ Timed out. Check Render logs.';
         statusEl.style.color = '#dc2626';
         btn.disabled = false;
         btn.textContent = '🔗 Get Pairing Code';
@@ -961,50 +878,40 @@ async function startPair(){
       
       try {
         var sRes = await fetch('/api/sessions');
-        if (!sRes.ok) throw new Error('Server not responding');
+        if (!sRes.ok) throw new Error('Server error');
         var sData = await sRes.json();
         var mySession = sData.sessions.find(s => s.id === d.id);
         
-        if (!mySession) return; // wait
-
+        if (!mySession) return;
         if (mySession.error) {
-          clearInterval(interval);
-          statusEl.textContent = 'Failed to generate code.';
+          clearInterval(interval); clearInterval(timerInterval);
+          statusEl.textContent = '❌ Failed';
           statusEl.style.color = '#dc2626';
           errBox.textContent = mySession.error;
           errBox.classList.remove('hidden');
-          btn.disabled = false;
-          btn.textContent = '🔗 Get Pairing Code';
+          btn.disabled = false; btn.textContent = '🔗 Get Pairing Code';
         } else if (mySession.code) {
-          clearInterval(interval);
-          statusEl.textContent = 'Code generated! Enter this in WhatsApp.';
+          clearInterval(interval); clearInterval(timerInterval);
+          statusEl.textContent = '✅ Code ready! Enter in WhatsApp:';
           statusEl.style.color = '#16a34a';
           codeBox.classList.remove('hidden');
           codeVal.textContent = mySession.code;
-          btn.disabled = false;
-          btn.textContent = '🔗 Get Pairing Code';
-          lastSessionsJson = ''; 
-          loadSessions();
+          btn.disabled = false; btn.textContent = '🔗 Get Pairing Code';
+          lastSessionsJson = ''; loadSessions();
         } else if (mySession.paired) {
-          clearInterval(interval);
-          statusEl.textContent = 'Successfully Linked! 🎉';
+          clearInterval(interval); clearInterval(timerInterval);
+          statusEl.textContent = '🎉 Successfully Linked!';
           statusEl.style.color = '#16a34a';
           codeBox.classList.add('hidden');
-          btn.disabled = false;
-          btn.textContent = '🔗 Get Pairing Code';
-          lastSessionsJson = ''; 
-          loadSessions();
-        } else if (mySession.connecting) {
-          statusEl.textContent = 'Waiting for WhatsApp to respond...';
+          btn.disabled = false; btn.textContent = '🔗 Get Pairing Code';
+          lastSessionsJson = ''; loadSessions();
         }
-      } catch (err) {
-        console.error(err);
-        statusEl.textContent = 'Checking status... (network lag)';
-      }
+      } catch (err) { console.error(err); }
     }, 1000);
 
   } catch(e) {
-    statusEl.textContent = 'Request failed.';
+    clearInterval(timerInterval);
+    statusEl.textContent = '❌ Request failed';
     statusEl.style.color = '#dc2626';
     errBox.textContent = e.message;
     errBox.classList.remove('hidden');
@@ -1015,24 +922,12 @@ async function startPair(){
 
 async function logoutSession(id){
   if(!confirm('Logout session "'+id+'"? 🚪')) return;
-  try{
-    await fetch('/api/sessions/'+encodeURIComponent(id)+'/logout',{method:'POST'});
-    lastSessionsJson='';
-    await loadSessions();
-    log('warn','Logged out: '+id);
-  }catch(e){alert('❌ '+e.message);}
+  try{await fetch('/api/sessions/'+encodeURIComponent(id)+'/logout',{method:'POST'});lastSessionsJson='';await loadSessions();log('warn','Logged out: '+id);}catch(e){alert('❌ '+e.message);}
 }
 
 async function deleteSession(id){
   if(!confirm('Delete session "'+id+'"? 🗑️')) return;
-  try{
-    var res=await fetch('/api/sessions/'+encodeURIComponent(id),{method:'DELETE'});
-    var d=await res.json();
-    if(!d.success){alert('❌ '+d.error);return;}
-    lastSessionsJson='';
-    await loadSessions();
-    log('warn','Deleted: '+id);
-  }catch(e){alert('❌ '+e.message);}
+  try{var res=await fetch('/api/sessions/'+encodeURIComponent(id),{method:'DELETE'});var d=await res.json();if(!d.success){alert('❌ '+d.error);return;}lastSessionsJson='';await loadSessions();log('warn','Deleted: '+id);}catch(e){alert('❌ '+e.message);}
 }
 
 function updateSessionDropdowns(){
@@ -1047,13 +942,11 @@ function updateSessionDropdowns(){
   if(paired.some(function(s){return s.id===bv;})) b.value=bv;
 }
 
-// ============ GROUPS (Dashboard) ============
 var allGroups=[];
 var dashSelected=new Set();
 
 function onGroupsSessionChange(){
-  dashSelected.clear();
-  allGroups=[];
+  dashSelected.clear(); allGroups=[];
   document.getElementById('groupsList').innerHTML='<div class="empty">Click Refresh to load groups 🌸</div>';
   document.getElementById('groupsCount').textContent='0 groups';
 }
@@ -1069,41 +962,24 @@ async function fetchGroups(){
     if(!d.success) throw new Error(d.error||'Failed');
     allGroups=d.groups||[];
     dashSelected.clear();
-    renderDashGroups();
-    renderBulkGroups();
+    renderDashGroups(); renderBulkGroups();
     log('info','Fetched '+allGroups.length+' groups from '+sessionId);
-  }catch(e){
-    listEl.innerHTML='<div class="empty" style="color:#dc2626">❌ '+escapeHtml(e.message)+'</div>';
-    log('err','Fetch groups: '+e.message);
-  }
+  }catch(e){listEl.innerHTML='<div class="empty" style="color:#dc2626">❌ '+escapeHtml(e.message)+'</div>';log('err','Fetch groups: '+e.message);}
 }
 
 function renderDashGroups(){
   var listEl=document.getElementById('groupsList');
   document.getElementById('groupsCount').textContent=allGroups.length+' groups';
-  if(!allGroups.length){
-    listEl.innerHTML='<div class="empty">No groups found 😢</div>';
-    return;
-  }
+  if(!allGroups.length){listEl.innerHTML='<div class="empty">No groups found 😢</div>';return;}
   listEl.innerHTML=allGroups.map(function(g){
-    var sel=dashSelected.has(g.id)?' selected':'';
-    var checked=dashSelected.has(g.id)?' checked':'';
-    return '<label class="group-item'+sel+'" data-jid="'+escapeHtml(g.id)+'">'+
-      '<input type="checkbox"'+checked+' onchange="toggleDashGroup(\''+escapeHtml(g.id)+'\',this.checked)"/>'+
-      '<div class="group-info">'+
-      '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
-      '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
-      '</div>'+
-      '<div class="group-meta">'+(g.size?g.size+' 👥':'')+'</div>'+
-      '</label>';
+    var sel=dashSelected.has(g.id)?' selected':'';var checked=dashSelected.has(g.id)?' checked':'';
+    return '<label class="group-item'+sel+'" data-jid="'+escapeHtml(g.id)+'"><input type="checkbox"'+checked+' onchange="toggleDashGroup(\''+escapeHtml(g.id)+'\',this.checked)"/><div class="group-info"><div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div><div class="group-jid">'+escapeHtml(g.id)+'</div></div><div class="group-meta">'+(g.size?g.size+' 👥':'')+'</div></label>';
   }).join('');
 }
 
 function toggleDashGroup(jid,checked){
   if(checked) dashSelected.add(jid); else dashSelected.delete(jid);
-  document.querySelectorAll('#groupsList .group-item').forEach(function(el){
-    if(el.dataset.jid===jid) el.classList.toggle('selected',checked);
-  });
+  document.querySelectorAll('#groupsList .group-item').forEach(function(el){if(el.dataset.jid===jid) el.classList.toggle('selected',checked);});
 }
 function selectAllGroups(){allGroups.forEach(function(g){dashSelected.add(g.id)});renderDashGroups();}
 function clearGroupSelection(){dashSelected.clear();renderDashGroups();}
@@ -1117,10 +993,7 @@ async function sendToSelectedGroups(){
   if(!msg){showMsg(box,'err','❌ Enter a message');return;}
   showMsg(box,'','');
   try{
-    var res=await fetch('/api/sessions/'+encodeURIComponent(sessionId)+'/send-groups',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({groupIds:Array.from(dashSelected),message:msg})
-    });
+    var res=await fetch('/api/sessions/'+encodeURIComponent(sessionId)+'/send-groups',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({groupIds:Array.from(dashSelected),message:msg})});
     var d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
     showMsg(box,'ok','💌 Sent to '+d.sent+'/'+d.total+' groups'+(d.failed?' ('+d.failed+' failed)':''));
@@ -1128,7 +1001,6 @@ async function sendToSelectedGroups(){
   }catch(e){showMsg(box,'err','❌ '+e.message);log('err','Group send: '+e.message);}
 }
 
-// ============ BULK ============
 var bulkSelected=new Set();
 
 async function fetchGroupsForBulk(){
@@ -1138,9 +1010,7 @@ async function fetchGroupsForBulk(){
     var res=await fetch('/api/sessions/'+encodeURIComponent(sessionId)+'/groups');
     var d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
-    allGroups=d.groups||[];
-    bulkSelected.clear();
-    renderBulkGroups();
+    allGroups=d.groups||[]; bulkSelected.clear(); renderBulkGroups();
     log('info','Loaded '+allGroups.length+' groups for bulk');
   }catch(e){alert('❌ '+e.message);log('err','Fetch groups: '+e.message);}
 }
@@ -1148,29 +1018,16 @@ async function fetchGroupsForBulk(){
 function renderBulkGroups(){
   var listEl=document.getElementById('bulkGroupsList');
   document.getElementById('bulkGroupsCount').textContent=bulkSelected.size+' selected';
-  if(!allGroups.length){
-    listEl.innerHTML='<div class="empty">Choose session & click Fetch 🌸</div>';
-    return;
-  }
+  if(!allGroups.length){listEl.innerHTML='<div class="empty">Choose session & click Fetch 🌸</div>';return;}
   listEl.innerHTML=allGroups.map(function(g){
-    var sel=bulkSelected.has(g.id)?' selected':'';
-    var checked=bulkSelected.has(g.id)?' checked':'';
-    return '<label class="group-item'+sel+'" data-jid="'+escapeHtml(g.id)+'">'+
-      '<input type="checkbox"'+checked+' onchange="toggleBulkGroup(\''+escapeHtml(g.id)+'\',this.checked)"/>'+
-      '<div class="group-info">'+
-      '<div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div>'+
-      '<div class="group-jid">'+escapeHtml(g.id)+'</div>'+
-      '</div>'+
-      '<div class="group-meta">'+(g.size?g.size+' 👥':'')+'</div>'+
-      '</label>';
+    var sel=bulkSelected.has(g.id)?' selected':'';var checked=bulkSelected.has(g.id)?' checked':'';
+    return '<label class="group-item'+sel+'" data-jid="'+escapeHtml(g.id)+'"><input type="checkbox"'+checked+' onchange="toggleBulkGroup(\''+escapeHtml(g.id)+'\',this.checked)"/><div class="group-info"><div class="group-name">'+escapeHtml(g.name||'(no name)')+'</div><div class="group-jid">'+escapeHtml(g.id)+'</div></div><div class="group-meta">'+(g.size?g.size+' 👥':'')+'</div></label>';
   }).join('');
 }
 function toggleBulkGroup(jid,checked){
   if(checked) bulkSelected.add(jid); else bulkSelected.delete(jid);
   document.getElementById('bulkGroupsCount').textContent=bulkSelected.size+' selected';
-  document.querySelectorAll('#bulkGroupsList .group-item').forEach(function(el){
-    if(el.dataset.jid===jid) el.classList.toggle('selected',checked);
-  });
+  document.querySelectorAll('#bulkGroupsList .group-item').forEach(function(el){if(el.dataset.jid===jid) el.classList.toggle('selected',checked);});
 }
 function selectAllBulkGroups(){allGroups.forEach(function(g){bulkSelected.add(g.id)});renderBulkGroups();}
 function clearBulkGroups(){bulkSelected.clear();renderBulkGroups();}
@@ -1181,16 +1038,11 @@ document.getElementById('fileInput').addEventListener('change',async function(e)
   var box=document.getElementById('queuePreview');
   if(!f){box.style.display='none';return;}
   try{
-    var text=await f.text();
-    var seen=new Set(); var msgs=[];
-    text.split(/\\r?\\n/).forEach(function(line){
-      var t=line.trim();
-      if(!t)return; if(seen.has(t))return; seen.add(t); msgs.push(t);
-    });
+    var text=await f.text();var seen=new Set();var msgs=[];
+    text.split(/\\r?\\n/).forEach(function(line){var t=line.trim();if(!t)return;if(seen.has(t))return;seen.add(t);msgs.push(t);});
     if(!msgs.length){box.style.display='none';return;}
     box.style.display='block';
-    box.innerHTML='<div style="color:#a78bfa;margin-bottom:6px;font-weight:700">💌 Queue ('+msgs.length+' messages)</div>'+
-      msgs.map(function(m,i){return '<div><span class="qi">'+(i+1)+'.</span>'+escapeHtml(m.slice(0,80))+(m.length>80?'…':'')+'</div>';}).join('');
+    box.innerHTML='<div style="color:#a78bfa;margin-bottom:6px;font-weight:700">💌 Queue ('+msgs.length+' messages)</div>'+msgs.map(function(m,i){return '<div><span class="qi">'+(i+1)+'.</span>'+escapeHtml(m.slice(0,80))+(m.length>80?'…':'')+'</div>';}).join('');
   }catch(_){box.style.display='none';}
 });
 
@@ -1201,56 +1053,36 @@ async function startServer(){
   var delay=parseInt(document.getElementById('delayInput').value)||10;
   if(delay<3) delay=3;
   var lastHater=document.getElementById('lastHaterInput').value.trim();
-
   if(!sessionId){alert('❌ Choose a session first');return;}
   if(!file){alert('❌ Upload a .txt file');return;}
   if(bulkSelected.size===0){alert('❌ Select at least one group');return;}
-
   var startBtn=document.getElementById('startBtn');
   startBtn.disabled=true;startBtn.textContent='🚀 Starting...';
-
   var fd=new FormData();
-  fd.append('file',file);
-  fd.append('hater',hater);
-  fd.append('delay',String(delay));
-  fd.append('lastHater',lastHater);
-  fd.append('groupIds',JSON.stringify(Array.from(bulkSelected)));
+  fd.append('file',file);fd.append('hater',hater);fd.append('delay',String(delay));
+  fd.append('lastHater',lastHater);fd.append('groupIds',JSON.stringify(Array.from(bulkSelected)));
   fd.append('sessionId',sessionId);
-
   log('info','Starting bulk task on '+sessionId+'...');
   try{
     var res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     var d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','Task started — '+d.total+' messages × '+d.totalTargets+' targets');
-  }catch(e){
-    log('err','Start failed: '+e.message);
-    alert('❌ '+e.message);
-  }finally{
-    startBtn.disabled=false;startBtn.textContent='🚀 Start';
-  }
+  }catch(e){log('err','Start failed: '+e.message);alert('❌ '+e.message);}
+  finally{startBtn.disabled=false;startBtn.textContent='🚀 Start';}
 }
 
 async function stopTask(){
-  try{
-    var res=await fetch('/api/bulk/stop',{method:'POST'});
-    var d=await res.json();
-    if(d.success) log('warn','Stop requested 💫');
-    else log('err',d.error||'No task running');
-  }catch(e){log('err',e.message);}
+  try{var res=await fetch('/api/bulk/stop',{method:'POST'});var d=await res.json();if(d.success) log('warn','Stop requested 💫');else log('err',d.error||'No task running');}catch(e){log('err',e.message);}
 }
 
-// ============ POLLING ============
 var lastLogId=0;
 async function pollStats(){
   try{
-    var res=await fetch('/api/bulk/status');
-    var d=await res.json();
-
+    var res=await fetch('/api/bulk/status');var d=await res.json();
     var statusEl=document.getElementById('statStatus');
     statusEl.textContent=d.running?'Running':'Idle';
     statusEl.style.color=d.running?'#16a34a':'#5a4a5a';
-
     document.getElementById('statSession').textContent=d.sessionId||'—';
     document.getElementById('statUptime').textContent=d.uptimeFormatted||'00:00:00';
     document.getElementById('statSent').textContent=d.sent||0;
@@ -1258,29 +1090,18 @@ async function pollStats(){
     document.getElementById('statCycle').textContent=d.cycle||0;
     document.getElementById('statTotal').textContent=d.total||0;
     document.getElementById('statRemaining').textContent=d.remaining||0;
-
     document.getElementById('statCurMsg').textContent=d.currentMessage?(d.currentMessage.slice(0,40)+(d.currentMessage.length>40?'…':'')):'—';
     document.getElementById('statCurTarget').textContent=d.currentTarget?d.currentTarget.slice(0,30):'—';
-
     var pct=(d.total&&d.total>0)?Math.round(((d.total-d.remaining)/d.total)*100):0;
     document.getElementById('statProgress').textContent=pct+'%';
     document.getElementById('progBar').style.width=pct+'%';
-
     var startBtn=document.getElementById('startBtn');
     var stopBtn=document.getElementById('stopBtn');
     if(d.running){startBtn.disabled=true;stopBtn.disabled=false;}
     else{startBtn.disabled=false;stopBtn.disabled=true;}
-
     if(d.logs&&d.logs.length){
       var box=document.getElementById('logBox');
-      d.logs.forEach(function(l){
-        if(l.id>lastLogId){
-          var el=document.createElement('div');
-          el.className='line '+(l.type||'info');
-          el.innerHTML='<span class="t">['+new Date(l.ts).toLocaleTimeString()+']</span>'+escapeHtml(l.msg);
-          box.appendChild(el);
-        }
-      });
+      d.logs.forEach(function(l){if(l.id>lastLogId){var el=document.createElement('div');el.className='line '+(l.type||'info');el.innerHTML='<span class="t">['+new Date(l.ts).toLocaleTimeString()+']</span>'+escapeHtml(l.msg);box.appendChild(el);}});
       lastLogId=d.logs[d.logs.length-1].id;
       box.scrollTop=box.scrollHeight;
       while(box.children.length>500) box.removeChild(box.firstChild);
@@ -1296,270 +1117,144 @@ pollStats();
 </body>
 </html>`;
 
-// ============================================================
-// EXPRESS APP
-// ============================================================
+// ============ EXPRESS APP ============
 const app = express();
 app.use(express.json());
-
 app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
-
 const upload = multer({ dest: uploadsDir });
 
-// -------- Direct Pairing --------
 app.post('/api/pair-new', async (req, res) => {
   try {
     let { phone } = req.body;
     if (!phone || !/^\d{10,15}$/.test(phone)) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number. Country code ke sath dalein (bina + ke).' });
+      return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
-    
-    // Auto-add 91 if only 10 digits provided (India)
-    if (phone.length === 10) {
-      phone = '91' + phone;
-    }
-
+    if (phone.length === 10) phone = '91' + phone;
     const id = 'session_' + phone.slice(-4) + '_' + Date.now().toString().slice(-4);
-    const s = ensureSession(id);
-    
-    // Start connecting
+    ensureSession(id);
     connectSession(id, phone).catch((e) => {
       console.error('Connect failed:', e.message);
-      s.lastError = e.message;
+      const s = sessions.get(id);
+      if (s) s.lastError = e.message;
     });
-
-    // Return ID immediately, frontend will poll for the code
     res.json({ success: true, id });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// -------- Session list --------
 app.get('/api/sessions', (req, res) => {
   const list = [...sessions.values()].map((s) => ({
-    id: s.id,
-    paired: s.isPaired,
-    connecting: s.isConnecting,
-    phone: s.phone,
-    code: s.isPaired ? null : s.pairingCode,
-    connectedAt: s.connectedAt,
-    error: s.lastError,
+    id: s.id, paired: s.isPaired, connecting: s.isConnecting, phone: s.phone,
+    code: s.isPaired ? null : s.pairingCode, connectedAt: s.connectedAt, error: s.lastError,
   }));
   res.json({ success: true, sessions: list });
 });
 
-// -------- Logout session --------
 app.post('/api/sessions/:id/logout', async (req, res) => {
   const id = req.params.id;
   const s = sessions.get(id);
-  if (!s) return res.status(404).json({ success: false, error: 'Session not found' });
-
-  if (bulkState.running && bulkState.sessionId === id) {
-    bulkState.stopFlag = true;
-    pushLog('warn', `[${id}] Logout — stopping worker`);
-  }
+  if (!s) return res.status(404).json({ success: false, error: 'Not found' });
+  if (bulkState.running && bulkState.sessionId === id) { bulkState.stopFlag = true; }
   if (s.sock) { try { await s.sock.logout(); } catch (_) {} }
   if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
-
-  s.sock = null;
-  s.isPaired = false;
-  s.pairingCode = null;
-  s.phone = null;
-  s.pairingRequested = false;
-  s.isConnecting = false;
-  s.connectedAt = null;
-  s.lastError = null;
-  s.groupsCache = {};
-  pushLog('warn', `[${id}] Logged out`);
+  s.sock = null; s.isPaired = false; s.pairingCode = null; s.phone = null;
+  s.isConnecting = false; s.connectedAt = null; s.lastError = null; s.groupsCache = {};
   res.json({ success: true });
 });
 
-// -------- Delete session --------
 app.delete('/api/sessions/:id', async (req, res) => {
   const id = req.params.id;
   const s = sessions.get(id);
-  if (!s) return res.status(404).json({ success: false, error: 'Session not found' });
-  if (bulkState.running && bulkState.sessionId === id) {
-    return res.status(400).json({ success: false, error: 'Stop bulk task first' });
-  }
+  if (!s) return res.status(404).json({ success: false, error: 'Not found' });
+  if (bulkState.running && bulkState.sessionId === id) return res.status(400).json({ success: false, error: 'Stop bulk first' });
   if (s.sock) { try { await s.sock.logout(); } catch (_) {} }
   if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
   sessions.delete(id);
   res.json({ success: true });
 });
 
-// -------- Get groups for session --------
 app.get('/api/sessions/:id/groups', async (req, res) => {
-  const id = req.params.id;
-  const s = sessions.get(id);
-  if (!s || !s.isPaired || !s.sock) {
-    return res.status(400).json({ success: false, error: 'Session not paired' });
-  }
+  const s = sessions.get(req.params.id);
+  if (!s || !s.isPaired || !s.sock) return res.status(400).json({ success: false, error: 'Not paired' });
   try {
     const map = new Map();
     Object.values(s.groupsCache).forEach((g) => map.set(g.id, g));
-
-    try {
-      getGroupsFromStore(s).forEach((g) => {
-        if (!map.has(g.id)) map.set(g.id, g);
-      });
-    } catch (_) {}
-
+    try { getGroupsFromStore(s).forEach((g) => { if (!map.has(g.id)) map.set(g.id, g); }); } catch (_) {}
     if (map.size === 0 && typeof s.sock.groupFetchAllParticipating === 'function') {
       try {
         const all = await s.sock.groupFetchAllParticipating();
-        Object.values(all).forEach((g) => {
-          map.set(g.id, {
-            id: g.id, name: g.subject || '',
-            size: g.participants ? g.participants.length : 0,
-          });
-        });
-      } catch (e) { console.error('groupFetchAllParticipating failed:', e.message); }
+        Object.values(all).forEach((g) => { map.set(g.id, { id: g.id, name: g.subject || '', size: g.participants?.length || 0 }); });
+      } catch (e) { console.error('group fetch failed:', e.message); }
     }
-
-    const groups = [...map.values()]
-      .filter((g) => g.id && g.id.endsWith('@g.us'))
-      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-
+    const groups = [...map.values()].filter((g) => g.id && g.id.endsWith('@g.us')).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     groups.forEach((g) => { s.groupsCache[g.id] = g; });
     res.json({ success: true, groups });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
-// -------- Send to groups (dashboard) --------
 app.post('/api/sessions/:id/send-groups', async (req, res) => {
-  const id = req.params.id;
-  const s = sessions.get(id);
-  if (!s || !s.isPaired || !s.sock) {
-    return res.status(400).json({ success: false, error: 'Session not paired' });
-  }
+  const s = sessions.get(req.params.id);
+  if (!s || !s.isPaired || !s.sock) return res.status(400).json({ success: false, error: 'Not paired' });
   const { groupIds, message } = req.body;
-  if (!Array.isArray(groupIds) || !groupIds.length) {
-    return res.status(400).json({ success: false, error: 'No groups selected' });
-  }
-  if (!message || !message.trim()) {
-    return res.status(400).json({ success: false, error: 'Message is required' });
-  }
-  let sent = 0, failed = 0;
-  const errors = [];
+  if (!Array.isArray(groupIds) || !groupIds.length) return res.status(400).json({ success: false, error: 'No groups' });
+  if (!message || !message.trim()) return res.status(400).json({ success: false, error: 'Message required' });
+  let sent = 0, failed = 0; const errors = [];
   for (const jid of groupIds) {
-    try {
-      await s.sock.sendMessage(jid, { text: message });
-      sent++;
-    } catch (e) {
-      failed++;
-      errors.push(jid + ': ' + e.message);
-    }
+    try { await s.sock.sendMessage(jid, { text: message }); sent++; }
+    catch (e) { failed++; errors.push(jid + ': ' + e.message); }
     await sleep(800);
   }
   res.json({ success: true, sent, failed, total: groupIds.length, errors });
 });
 
-// ============================================================
-// BULK START — per session
-// ============================================================
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
     const { hater, delay, lastHater, groupIds, sessionId } = req.body;
-
     const s = sessions.get(sessionId);
-    if (!s || !s.isPaired || !s.sock) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'Selected session not paired' });
-    }
-    if (bulkState.running) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running. Stop it first.' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Upload a .txt file' });
-    }
-
+    if (!s || !s.isPaired || !s.sock) { if (req.file) try { fs.unlinkSync(req.file.path); } catch (_) {} return res.status(400).json({ success: false, error: 'Not paired' }); }
+    if (bulkState.running) { if (req.file) try { fs.unlinkSync(req.file.path); } catch (_) {} return res.status(400).json({ success: false, error: 'Already running' }); }
+    if (!req.file) return res.status(400).json({ success: false, error: 'Upload .txt' });
     let messages = [];
-    try { messages = parseMessagesFile(req.file.path); }
-    finally { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-
-    if (!messages.length) {
-      return res.status(400).json({ success: false, error: 'No valid messages in file' });
-    }
-
-    const targets = [];
-    const seen = new Set();
-    let parsedGroups = [];
-    try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
-    parsedGroups.forEach((jid) => {
-      if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
-    });
-    if (!targets.length) {
-      return res.status(400).json({ success: false, error: 'Select at least one group' });
-    }
-
+    try { messages = parseMessagesFile(req.file.path); } finally { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+    if (!messages.length) return res.status(400).json({ success: false, error: 'No messages' });
+    const targets = []; const seen = new Set();
+    let parsedGroups = []; try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
+    parsedGroups.forEach((jid) => { if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); } });
+    if (!targets.length) return res.status(400).json({ success: false, error: 'Select groups' });
     let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS;
     if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
     const waitMs = delaySec * 1000;
-
     const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
     const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
-
-    bulkState.running = true;
-    bulkState.stopFlag = false;
-    bulkState.sessionId = sessionId;
-    bulkState.sent = 0;
-    bulkState.failed = 0;
-    bulkState.tasks += 1;
-    bulkState.total = messages.length;
-    bulkState.remaining = messages.length;
-    bulkState.cycle = 0;
-    bulkState.msgIndex = 0;
-    bulkState.targetIndex = 0;
+    bulkState.running = true; bulkState.stopFlag = false; bulkState.sessionId = sessionId;
+    bulkState.sent = 0; bulkState.failed = 0; bulkState.tasks += 1;
+    bulkState.total = messages.length; bulkState.remaining = messages.length;
+    bulkState.cycle = 0; bulkState.msgIndex = 0; bulkState.targetIndex = 0;
     bulkState.totalTargets = targets.length;
     bulkState.currentMessage = preparedMessages[0] || '';
-    bulkState.currentTarget = targets[0] ? targets[0].label : '';
-    bulkState.targets = targets;
-    bulkState.messages = preparedMessages;
-    bulkState.delayMs = waitMs;
-    bulkState.startedAt = Date.now();
-    bulkState.workerAlive = false;
-    bulkState.lastBeat = Date.now();
-
-    pushLog('info', `[${sessionId}] Task #${bulkState.tasks} started — ${messages.length} msgs × ${targets.length} targets, delay ${delaySec}s`);
-    pushLog('info', 'Loop mode: 24/7 continuous. Press Emergency Stop to halt.');
-
+    bulkState.currentTarget = targets[0]?.label || '';
+    bulkState.targets = targets; bulkState.messages = preparedMessages;
+    bulkState.delayMs = waitMs; bulkState.startedAt = Date.now();
+    bulkState.workerAlive = false; bulkState.lastBeat = Date.now();
+    pushLog('info', `Task #${bulkState.tasks} started — ${messages.length} msgs × ${targets.length} targets`);
     runWorker();
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
-  } catch (err) {
-    console.error('Bulk start error:', err);
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { console.error('Bulk start error:', err); res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/api/bulk/stop', (req, res) => {
-  if (!bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
-  bulkState.stopFlag = true;
-  pushLog('warn', 'Stop signal received — halting loop');
+  if (!bulkState.running) return res.status(400).json({ success: false, error: 'No task' });
+  bulkState.stopFlag = true; pushLog('warn', 'Stop signal received');
   res.json({ success: true });
 });
 
 app.get('/api/bulk/status', (req, res) => {
   res.json({
-    running: bulkState.running,
-    workerAlive: bulkState.workerAlive,
-    sessionId: bulkState.sessionId,
-    sent: bulkState.sent,
-    failed: bulkState.failed,
-    tasks: bulkState.tasks,
-    total: bulkState.total,
-    remaining: bulkState.remaining,
-    cycle: bulkState.cycle,
-    msgIndex: bulkState.msgIndex,
-    targetIndex: bulkState.targetIndex,
-    totalTargets: bulkState.totalTargets,
-    currentMessage: bulkState.currentMessage,
-    currentTarget: bulkState.currentTarget,
+    running: bulkState.running, workerAlive: bulkState.workerAlive, sessionId: bulkState.sessionId,
+    sent: bulkState.sent, failed: bulkState.failed, tasks: bulkState.tasks,
+    total: bulkState.total, remaining: bulkState.remaining, cycle: bulkState.cycle,
+    msgIndex: bulkState.msgIndex, targetIndex: bulkState.targetIndex, totalTargets: bulkState.totalTargets,
+    currentMessage: bulkState.currentMessage, currentTarget: bulkState.currentTarget,
     uptimeFormatted: formatUptime(Date.now() - serverStartTime),
     logs: bulkState.logs.slice(-200),
   });
@@ -1567,14 +1262,10 @@ app.get('/api/bulk/status', (req, res) => {
 
 app.get('/health', (req, res) => res.json({ status: 'ok', sessions: sessions.size }));
 
-// ============================================================
-// STARTUP
-// ============================================================
-ensureSession('default'); // backward-compat default session
-
+ensureSession('default');
 app.listen(PORT, HOST, () => {
-  console.log('\n🌸 Cute Dashboard: http://' + HOST + ':' + PORT + '/ 💖\n');
-  pushLog('info', 'Server started — multi-session ready');
+  console.log(`\n🌸 Cute Dashboard: http://${HOST}:${PORT}/ 💖\n`);
+  pushLog('info', 'Server started');
 });
 
 process.on('SIGTERM', () => process.exit(0));
