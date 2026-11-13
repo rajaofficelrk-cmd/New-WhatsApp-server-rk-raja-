@@ -3,6 +3,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestBaileysVersion,
+  Browsers
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
@@ -222,14 +223,13 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
-      // FIXED: Optimized socket config with native mobile handshake support to resolve "Couldn't link device"
+      // FIXED: Using Browsers.macOS('Chrome') to bypass server restrictions against pairing code generation
       this.sock = makeWASocket({
         version,
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Chrome (Linux)', 'Chrome', '120.0.0.0'],
-        mobile: false,
+        browser: Browsers.macOS('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: true,
         connectTimeoutMs: 60000,
@@ -264,7 +264,7 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            await new Promise((r) => setTimeout(r, 4000)); // 4s stabilization delay for WhatsApp server handshake
+            await new Promise((r) => setTimeout(r, 5000)); // 5 seconds stabilized handshake delay
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
             this.lastError = null;
@@ -348,7 +348,6 @@ class WhatsAppSession {
   }
 }
 
-// Watchdog for all sessions
 setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
@@ -367,7 +366,6 @@ function getOrCreateSession(name) {
   return sessions[cleanName];
 }
 
-// Load existing sessions from disk on startup
 if (fs.existsSync(SESSIONS_BASE_DIR)) {
   fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
     if (dirent.isDirectory()) {
@@ -379,9 +377,6 @@ if (Object.keys(sessions).length === 0) {
   getOrCreateSession('default');
 }
 
-// ============================================================
-// LIVE CYBERPUNK THEME DASHBOARD UI WITH MULTI-SESSION SUPPORT
-// ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
