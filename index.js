@@ -223,7 +223,6 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
-      // FIXED: Using standard Desktop browser header config to prevent pairing rejection
       this.sock = makeWASocket({
         version,
         auth: state,
@@ -264,7 +263,6 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            // Increased delay to 6 seconds to let websocket fully establish secure handshake
             await new Promise((r) => setTimeout(r, 6000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code generated for ${phone}: ${this.pairingCode}`);
@@ -383,7 +381,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD — Multi-Session Cyber Control Center</title>
+<title>RK RAJA XWD — Secure Multi-Session Control Center</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
   
@@ -609,7 +607,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="container">
   <div class="brand">
     <h1>RK <span class="x">X</span> RAJA</h1>
-    <p>Multi-Session Cyber Control Center</p>
+    <p>Secure Multi-Session Control Center</p>
   </div>
 
   <div class="tabs">
@@ -626,6 +624,10 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <select id="dashSessionSelect" onchange="onSessionChange()"></select>
           <button class="ghost" style="width:auto;margin-top:0" onclick="createNewSessionPrompt()">+ New Session</button>
         </div>
+      </div>
+      <div class="field" style="margin-top:12px">
+        <label>Session Security Password (Required to manage this session)</label>
+        <input id="sessionPassword" type="password" placeholder="Enter session password..." oninput="savePassword()"/>
       </div>
     </div>
 
@@ -685,7 +687,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <h2><span class="dot"></span>Danger Zone</h2>
-      <p class="hint">Logout deletes session auth for this specific session.</p>
+      <p class="hint">Logout requires correct session password.</p>
       <button class="ghost" onclick="logout()">Logout / Delete Session</button>
     </div>
   </div>
@@ -774,7 +776,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Live Cyber Log</h2>
           <div class="log" id="logBox">
-            <div class="line"><span class="t">[boot]</span> Multi-session cyberpunk system initialized. Ready...</div>
+            <div class="line"><span class="t">[boot]</span> Secure multi-session system initialized. Ready...</div>
           </div>
           <div class="btnrow" style="margin-top:14px">
             <button class="ghost" onclick="clearLog()">Clear Log</button>
@@ -785,11 +787,24 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD 💀 © — Multi-Session Cyber Edition</div>
+  <div class="footer">RK RAJA XWD 💀 © — Secure Cyber Edition</div>
 </div>
 
 <script>
 let currentSession = 'default';
+let sessionPasswords = JSON.parse(localStorage.getItem('sessionPasswords') || '{}');
+
+function getPassword(){
+  return sessionPasswords[currentSession] || document.getElementById('sessionPassword').value.trim();
+}
+
+function savePassword(){
+  const pwd = document.getElementById('sessionPassword').value.trim();
+  if(pwd){
+    sessionPasswords[currentSession] = pwd;
+    localStorage.setItem('sessionPasswords', JSON.stringify(sessionPasswords));
+  }
+}
 
 function switchTab(name){
   document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('active',t.dataset.tab===name));
@@ -820,6 +835,7 @@ async function loadSessions(){
       if(!d.sessions.includes(currentSession) && d.sessions.length){
         currentSession = d.sessions[0];
       }
+      document.getElementById('sessionPassword').value = sessionPasswords[currentSession] || '';
     }
   }catch(e){console.error(e);}
 }
@@ -827,6 +843,7 @@ async function loadSessions(){
 function onSessionChange(){
   currentSession = document.getElementById('dashSessionSelect').value;
   document.getElementById('senderSessionSelect').value = currentSession;
+  document.getElementById('sessionPassword').value = sessionPasswords[currentSession] || '';
   allGroups = [];
   dashSelected.clear();
   bulkSelected.clear();
@@ -838,6 +855,7 @@ function onSessionChange(){
 function syncSessionDropdowns(val){
   currentSession = val;
   document.getElementById('dashSessionSelect').value = currentSession;
+  document.getElementById('sessionPassword').value = sessionPasswords[currentSession] || '';
   allGroups = [];
   dashSelected.clear();
   bulkSelected.clear();
@@ -851,24 +869,48 @@ async function createNewSessionPrompt(){
   if(!name) return;
   const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   if(!clean) return;
-  currentSession = clean;
-  await loadSessions();
-  document.getElementById('dashSessionSelect').value = currentSession;
-  document.getElementById('senderSessionSelect').value = currentSession;
-  onSessionChange();
+
+  const pwd = prompt('Set a security password for session "'+clean+'" (Only you can control it with this password):');
+  if(!pwd) return alert('Password is required to secure your session!');
+
+  try {
+    const res = await fetch('/api/sessions/create', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ session: clean, password: pwd })
+    });
+    const d = await res.json();
+    if(!d.success) throw new Error(d.error || 'Failed to create session');
+    
+    sessionPasswords[clean] = pwd;
+    localStorage.setItem('sessionPasswords', JSON.stringify(sessionPasswords));
+
+    currentSession = clean;
+    await loadSessions();
+    document.getElementById('dashSessionSelect').value = currentSession;
+    document.getElementById('senderSessionSelect').value = currentSession;
+    document.getElementById('sessionPassword').value = pwd;
+    onSessionChange();
+    pollStatus();
+  } catch(e) {
+    alert(e.message);
+  }
 }
 
 async function startPair(){
   const phone=document.getElementById('phoneInput').value.trim();
+  const pwd=getPassword();
   const btn=document.getElementById('pairBtn');
   const msgEl=document.getElementById('pairMsg');
   const codeSection=document.getElementById('codeSection');
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
+  if(!pwd){alert('Enter session password first!');return;}
+
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
     const res=await fetch('/api/pair',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({phone, session: currentSession})
+      body:JSON.stringify({phone, session: currentSession, password: pwd})
     });
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
@@ -881,12 +923,17 @@ async function startPair(){
 }
 
 async function logout(){
-  if(!confirm('Logout session "'+currentSession+'"? Auth will be deleted.'))return;
+  const pwd=getPassword();
+  if(!confirm('Logout session "'+currentSession+'"? Password required.'))return;
   try{
-    await fetch('/api/logout',{
+    const res = await fetch('/api/logout',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session: currentSession})
+      body:JSON.stringify({session: currentSession, password: pwd})
     });
+    const d = await res.json();
+    if(!d.success) throw new Error(d.error || 'Unauthorized');
+    delete sessionPasswords[currentSession];
+    localStorage.setItem('sessionPasswords', JSON.stringify(sessionPasswords));
     await loadSessions();
     onSessionChange();
   }catch(e){alert(e.message);}
@@ -902,7 +949,7 @@ async function fetchGroups(){
   btn.disabled=true;btn.textContent='Fetching...';
   listEl.innerHTML='<div class="empty">Loading groups...</div>';
   try{
-    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession));
+    const res=await fetch('/api/groups?session='+encodeURIComponent(currentSession)+'&password='+encodeURIComponent(getPassword()));
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed to fetch');
     allGroups = d.groups || [];
@@ -955,7 +1002,7 @@ async function sendToSelectedGroups(){
   try{
     const res=await fetch('/api/send-groups',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session: currentSession, groupIds:[...dashSelected], message:msg})
+      body:JSON.stringify({session: currentSession, password: getPassword(), groupIds:[...dashSelected], message:msg})
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
@@ -1033,6 +1080,7 @@ async function startServer(){
 
   const fd=new FormData();
   fd.append('session', currentSession);
+  fd.append('password', getPassword());
   fd.append('file',file);
   fd.append('hater',hater);
   fd.append('delay',String(delay));
@@ -1057,11 +1105,11 @@ async function stopTask(){
   try{
     const res=await fetch('/api/bulk/stop',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session: currentSession})
+      body:JSON.stringify({session: currentSession, password: getPassword()})
     });
     const d=await res.json();
     if(d.success) log('warn','Emergency stop executed for session: '+currentSession);
-    else log('err',d.error||'No task running');
+    else log('err',d.error||'Unauthorized or no task running');
   }catch(e){log('err',e.message);}
 }
 
@@ -1081,6 +1129,7 @@ async function pollStatus(){
 
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
+    
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
       codeSection.classList.add('hidden');pairCard.classList.add('hidden');
@@ -1094,6 +1143,8 @@ async function pollStatus(){
       pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
     }else{
       badge.textContent='Idle';badge.className='badge b-idle';
+      pairCard.classList.remove('hidden');
+      codeSection.classList.add('hidden');
       phoneInput.disabled=false;pairBtn.disabled=false;
     }
     if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
@@ -1164,15 +1215,43 @@ app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
+// In-memory secure passwords for sessions
+const sessionPasswords = {};
+
 app.get('/api/sessions', (req, res) => {
   const list = Object.keys(sessions);
   if (!list.includes('default')) list.unshift('default');
   res.json({ success: true, sessions: list });
 });
 
+app.post('/api/sessions/create', (req, res) => {
+  const { session, password } = req.body;
+  if(!session) return res.status(400).json({ success: false, error: 'Session name required' });
+  if(!password) return res.status(400).json({ success: false, error: 'Password required' });
+  
+  const clean = session.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  sessionPasswords[clean] = password;
+  getOrCreateSession(clean);
+  res.json({ success: true });
+});
+
+function verifyAuth(session, pwd) {
+  const clean = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+  // If no password was ever set for this session, allow first access and set it
+  if (!sessionPasswords[clean]) {
+    if (pwd) sessionPasswords[clean] = pwd;
+    return true;
+  }
+  return sessionPasswords[clean] === pwd;
+}
+
 app.post('/api/pair', async (req, res) => {
   try {
-    const { phone, session } = req.body;
+    const { phone, session, password } = req.body;
+    if (!verifyAuth(session, password)) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    }
+
     const sess = getOrCreateSession(session);
 
     if (!phone || !/^\d{10,15}$/.test(phone)) {
@@ -1209,6 +1288,11 @@ app.get('/api/status', (req, res) => {
 app.get('/api/groups', async (req, res) => {
   try {
     const sessName = req.query.session || 'default';
+    const pwd = req.query.password;
+    if (!verifyAuth(sessName, pwd)) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    }
+
     const sess = getOrCreateSession(sessName);
 
     if (!sess.isPaired || !sess.sock) {
@@ -1251,7 +1335,11 @@ app.get('/api/groups', async (req, res) => {
 
 app.post('/api/send-groups', async (req, res) => {
   try {
-    const { session, groupIds, message } = req.body;
+    const { session, password, groupIds, message } = req.body;
+    if (!verifyAuth(session, password)) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    }
+
     const sess = getOrCreateSession(session);
 
     if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
@@ -1282,12 +1370,17 @@ app.post('/api/send-groups', async (req, res) => {
 
 app.post('/api/logout', async (req, res) => {
   try {
-    const { session } = req.body;
+    const { session, password } = req.body;
     const sessName = session || 'default';
+    if (!verifyAuth(sessName, password)) {
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    }
+
     const sess = sessions[sessName];
     if (sess) {
       await sess.logout();
       delete sessions[sessName];
+      delete sessionPasswords[sessName];
     }
     res.json({ success: true });
   } catch (err) {
@@ -1297,7 +1390,12 @@ app.post('/api/logout', async (req, res) => {
 
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
-    const { session, hater, delay, lastHater, groupIds } = req.body;
+    const { session, password, hater, delay, lastHater, groupIds } = req.body;
+    if (!verifyAuth(session, password)) {
+      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    }
+
     const sess = getOrCreateSession(session);
 
     if (!sess.isPaired || !sess.sock) {
@@ -1382,11 +1480,15 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 });
 
 app.post('/api/bulk/stop', (req, res) => {
-  const { session } = req.body;
+  const { session, password } = req.body;
+  if (!verifyAuth(session, password)) {
+    return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+  }
+
   const sess = getOrCreateSession(session);
   if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
   sess.bulkState.stopFlag = true;
-  sess.pushLog('warn', 'Emergency stop signal received from user');
+  sess.pushLog('warn', 'Emergency stop signal received from authorized user');
   res.json({ success: true });
 });
 
@@ -1416,8 +1518,9 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Multi-Session Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🌐 Secure Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
+process.exit = process.exit || (() => {});
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
