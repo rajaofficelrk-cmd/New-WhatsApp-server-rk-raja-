@@ -15,7 +15,7 @@ const PORT = process.env.PORT || 25029;
 const HOST = '0.0.0.0';
 const SESSIONS_BASE_DIR = 'sessions_data';
 
-// Yahan apna Admin Password set kar lo jo website kholte hi maangega
+// Admin Password (aap ise badal bhi sakte hain)
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'raja123';
 
 if (!fs.existsSync(SESSIONS_BASE_DIR)) {
@@ -227,7 +227,7 @@ class WhatsAppSession {
         auth: state,
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', '20.0.04'],
+        browser: ['Chrome (Linux)', 'Chrome', '120.0.0.0'], // Stable browser headers for pairing
         mobile: false,
         syncFullHistory: false,
       });
@@ -260,7 +260,8 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            await new Promise((r) => setTimeout(r, 1000));
+            // 3 seconds stable delay to prevent "Couldn't link device" error
+            await new Promise((r) => setTimeout(r, 3000));
             this.pairingCode = await this.sock.requestPairingCode(phone);
             this.pushLog('info', `Pairing code for ${phone}: ${this.pairingCode}`);
             this.lastError = null;
@@ -374,7 +375,7 @@ if (Object.keys(sessions).length === 0) {
 }
 
 // ============================================================
-// EMBEDDED HTML WITH LOGIN SCREEN & PERMANENT PAIRING INPUT
+// DASHBOARD HTML (UI)
 // ============================================================
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -408,7 +409,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .brand h1 .x{color:#ff003c;-webkit-text-fill-color:#ff003c;text-shadow:0 0 18px #ff003c}
   .brand p{color:#8b8b9c;font-size:11px;letter-spacing:3px;margin-top:6px;text-transform:uppercase}
 
-  /* Login Overlay */
   #loginOverlay{
     position:fixed;inset:0;background:#050507;z-index:9999;
     display:flex;align-items:center;justify-content:center;padding:20px;
@@ -534,20 +534,17 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 </head>
 <body>
 
-<!-- Admin Password Modal Overlay -->
 <div id="loginOverlay">
   <div class="login-card">
     <h2>🔒 Admin Security</h2>
     <div class="field">
       <label>Enter Control Password</label>
-      <input id="adminPassInput" type="password" placeholder="Enter password..." />
+      <input id="adminPassInput" type="password" placeholder="Enter password (raja123)..." />
     </div>
     <button onclick="verifyPassword()">Unlock Dashboard</button>
     <div id="loginMsg" class="msg"></div>
   </div>
 </div>
-
-<div class="streaks"><span></span><span></span><span></span><span></span></div>
 
 <div class="container">
   <div class="brand">
@@ -584,7 +581,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div id="errBox" class="msg err hidden"></div>
     </div>
 
-    <!-- FIXED: Pairing card ab hamesha dikhega, chahe session paired ho ya na ho, taaki naya number/session link karna aasan ho -->
     <div class="card" id="pairCard">
       <h2><span class="dot"></span>Pair WhatsApp (New / Re-Link)</h2>
       <label>Phone Number (country code, no + or spaces)</label>
@@ -730,7 +726,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">9MAN X YAMDHUD © — Secure Multi-Session WhatsApp Manager</div>
+  <div class="footer">9MAN X YAMDHUT © — Secure Multi-Session WhatsApp Manager</div>
 </div>
 
 <script>
@@ -757,7 +753,6 @@ async function verifyPassword(){
   }catch(e){showMsg(msg, 'err', e.message);}
 }
 
-// Check saved token on load
 if(authToken){
   fetch('/api/verify', {
     method:'POST', headers:{'Content-Type':'application/json'},
@@ -883,10 +878,8 @@ async function fetchGroups(){
     allGroups = d.groups || [];
     renderDashGroups();
     renderBulkGroups();
-    log('info', 'Fetched '+allGroups.length+' groups');
   }catch(e){
     listEl.innerHTML='<div class="empty" style="color:#ff6b6b">'+escapeHtml(e.message)+'</div>';
-    log('err','Fetch groups: '+e.message);
   }finally{
     btn.disabled=false;btn.textContent='Refresh Groups';
   }
@@ -896,7 +889,7 @@ function renderDashGroups(){
   const listEl=document.getElementById('groupsList');
   document.getElementById('groupsCount').textContent=allGroups.length+' groups';
   if(!allGroups.length){
-    listEl.innerHTML='<div class="empty">No groups found for this WhatsApp account</div>';
+    listEl.innerHTML='<div class="empty">No groups found</div>';
     return;
   }
   listEl.innerHTML = allGroups.map(g=>{
@@ -934,9 +927,8 @@ async function sendToSelectedGroups(){
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
-    showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups'+(d.failed?' ('+d.failed+' failed)':''));
-    log('ok','Group send: '+d.sent+'/'+d.total+' success');
-  }catch(e){showMsg(box,'err',e.message);log('err','Group send: '+e.message);}
+    showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups');
+  }catch(e){showMsg(box,'err',e.message);}
   finally{btn.disabled=false;btn.textContent='Send to Selected Groups';}
 }
 
@@ -1018,10 +1010,9 @@ async function startServer(){
     const res=await fetch('/api/bulk/start',{method:'POST', headers:{'x-admin-token': authToken}, body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
-    log('ok','Task started — '+d.total+' messages in queue, '+d.totalTargets+' targets');
+    log('ok','Task started — '+d.total+' messages');
     stopBtn.disabled=false;
   }catch(e){
-    log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
   }finally{
     startBtn.disabled=false;startBtn.textContent='Start Server';
@@ -1030,14 +1021,12 @@ async function startServer(){
 
 async function stopTask(){
   try{
-    const res=await fetch('/api/bulk/stop',{
+    await fetch('/api/bulk/stop',{
       method:'POST',headers:{'Content-Type':'application/json', 'x-admin-token': authToken},
       body:JSON.stringify({session: currentSession})
     });
-    const d=await res.json();
-    if(d.success) log('warn','Stop requested — task will halt immediately');
-    else log('err',d.error||'No task running');
-  }catch(e){log('err',e.message);}
+    log('warn','Stop requested');
+  }catch(e){}
 }
 
 async function pollStatus(){
@@ -1058,7 +1047,6 @@ async function pollStatus(){
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
       codeSection.classList.add('hidden');
-      phoneInput.disabled=false;pairBtn.disabled=false; // FIXED: Paired hone ke baad bhi number input khula rahega taaki naya/dusra number link kar sakein
     }else if(d.code){
       badge.textContent='Waiting for pairing';badge.className='badge b-wait';
       codeSection.classList.remove('hidden');
@@ -1071,7 +1059,7 @@ async function pollStatus(){
     }
     if(d.error){errBox.textContent='⚠ '+d.error;errBox.classList.remove('hidden');}
     else{errBox.classList.add('hidden');}
-  }catch(e){console.error(e);}
+  }catch(e){}
 }
 
 let lastLogId=0;
@@ -1091,18 +1079,12 @@ async function pollStats(){
     document.getElementById('statCycle').textContent=d.cycle||0;
     document.getElementById('statTotal').textContent=d.total||0;
     document.getElementById('statRemaining').textContent=d.remaining||0;
-
-    document.getElementById('statCurMsg').textContent=d.currentMessage?(d.currentMessage.slice(0,40)+(d.currentMessage.length>40?'…':'')):'—';
+    document.getElementById('statCurMsg').textContent=d.currentMessage?d.currentMessage.slice(0,40):'—';
     document.getElementById('statCurTarget').textContent=d.currentTarget?d.currentTarget.slice(0,30):'—';
 
     const pct=(d.total&&d.total>0)?Math.round(((d.total-d.remaining)/d.total)*100):0;
     document.getElementById('statProgress').textContent=pct+'%';
     document.getElementById('progBar').style.width=pct+'%';
-
-    const startBtn=document.getElementById('startBtn');
-    const stopBtn=document.getElementById('stopBtn');
-    if(d.running){startBtn.disabled=true;stopBtn.disabled=false;}
-    else{startBtn.disabled=false;stopBtn.disabled=true;}
 
     if(d.logs&&d.logs.length){
       const box=document.getElementById('logBox');
@@ -1116,9 +1098,8 @@ async function pollStats(){
       });
       if(d.logs.length) lastLogId=d.logs[d.logs.length-1].id;
       box.scrollTop=box.scrollHeight;
-      while(box.children.length>500) box.removeChild(box.firstChild);
     }
-  }catch(e){console.error(e);}
+  }catch(e){}
 }
 
 function initApp(){
@@ -1133,13 +1114,9 @@ function initApp(){
 </body>
 </html>`;
 
-// ============================================================
-// Express app with Admin Authentication Middleware
-// ============================================================
 const app = express();
 app.use(express.json());
 
-// Simple token storage in memory
 const activeTokens = new Set();
 
 app.post('/api/login', (req, res) => {
@@ -1160,7 +1137,6 @@ app.post('/api/verify', (req, res) => {
   res.json({ success: false });
 });
 
-// Middleware to protect all management routes
 const requireAuth = (req, res, next) => {
   const token = req.headers['x-admin-token'];
   if (token && activeTokens.has(token)) {
@@ -1188,7 +1164,7 @@ app.post('/api/pair', requireAuth, async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid phone number' });
     }
     if (sess.isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection already in progress for session ' + sess.name });
+      return res.status(400).json({ success: false, error: 'Connection already in progress' });
     }
     if (fs.existsSync(sess.authDir)) fs.rmSync(sess.authDir, { recursive: true, force: true });
 
@@ -1196,7 +1172,7 @@ app.post('/api/pair', requireAuth, async (req, res) => {
       sess.lastError = e.message;
     });
 
-    res.json({ success: true, message: 'Pairing initiated for session ' + sess.name });
+    res.json({ success: true, message: 'Pairing initiated' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1221,7 +1197,7 @@ app.get('/api/groups', requireAuth, async (req, res) => {
     const sess = getOrCreateSession(sessName);
 
     if (!sess.isPaired || !sess.sock) {
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sessName });
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired' });
     }
 
     const map = new Map();
@@ -1263,7 +1239,7 @@ app.post('/api/send-groups', requireAuth, async (req, res) => {
     const { session, groupIds, message } = req.body;
     const sess = getOrCreateSession(session);
 
-    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sess.name });
+    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired' });
     if (!Array.isArray(groupIds) || !groupIds.length) {
       return res.status(400).json({ success: false, error: 'No groups selected' });
     }
@@ -1311,11 +1287,11 @@ app.post('/api/bulk/start', requireAuth, upload.single('file'), async (req, res)
 
     if (!sess.isPaired || !sess.sock) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired for session ' + sess.name + '.' });
+      return res.status(400).json({ success: false, error: 'WhatsApp not paired.' });
     }
     if (sess.bulkState.running) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running on session ' + sess.name + '.' });
+      return res.status(400).json({ success: false, error: 'A task is already running.' });
     }
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
@@ -1379,7 +1355,7 @@ app.post('/api/bulk/start', requireAuth, upload.single('file'), async (req, res)
     sess.bulkState.workerAlive = false;
     sess.bulkState.lastBeat = Date.now();
 
-    sess.pushLog('info', `Task #${sess.bulkState.tasks} started — ${messages.length} messages × ${targets.length} targets`);
+    sess.pushLog('info', `Task started — ${messages.length} messages × ${targets.length} targets`);
 
     sess.runWorker();
 
@@ -1394,7 +1370,7 @@ app.post('/api/bulk/stop', requireAuth, (req, res) => {
   const sess = getOrCreateSession(session);
   if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
   sess.bulkState.stopFlag = true;
-  sess.pushLog('warn', 'Stop signal received — halting loop');
+  sess.pushLog('warn', 'Stop signal received');
   res.json({ success: true });
 });
 
