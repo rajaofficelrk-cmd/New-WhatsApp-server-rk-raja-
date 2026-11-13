@@ -911,7 +911,7 @@ async function startPair(){
   var codeVal = document.getElementById('displayCode');
 
   if(!phone || !/^\\d{10,15}$/.test(phone)) {
-    showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath, jaise 91...)');
+    showMsg(msgEl, 'err', 'Sahi number dalein (Country code ke sath)');
     return;
   }
   
@@ -931,18 +931,56 @@ async function startPair(){
     
     if(!d.success) throw new Error(d.error||'Failed');
     
-    // SUCCESS! Show the code directly below the button
+    // Code box shows immediately with loading state
     codeArea.classList.remove('hidden');
-    codeVal.textContent = d.code;
-    showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
-    
-    // Refresh session list silently
-    lastSessionsJson = '';
-    loadSessions();
+    codeVal.textContent = 'WAIT...';
+    showMsg(msgEl, 'ok', 'Code generate ho raha hai, wait karein...');
+
+    // Poll for code directly in the box
+    let attempts = 0;
+    let interval = setInterval(async () => {
+      attempts++;
+      if(attempts > 30) { // 30 seconds timeout
+        clearInterval(interval);
+        codeVal.textContent = 'TIMEOUT';
+        showMsg(msgEl, 'err', 'Code generate nahi hua. Number ya network check karein.');
+        btn.disabled = false;
+        btn.textContent = '🔗 Get Pairing Code';
+        return;
+      }
+      
+      try {
+        var sRes = await fetch('/api/sessions');
+        var sData = await sRes.json();
+        var mySession = sData.sessions.find(s => s.id === d.id);
+        
+        if (mySession && mySession.code) {
+          clearInterval(interval);
+          codeVal.textContent = mySession.code;
+          showMsg(msgEl, 'ok', 'WhatsApp me code enter karein!');
+          btn.disabled = false;
+          btn.textContent = '🔗 Get Pairing Code';
+        } else if (mySession && mySession.paired) {
+          clearInterval(interval);
+          codeArea.classList.add('hidden');
+          showMsg(msgEl, 'ok', 'Successfully Linked! 🎉');
+          btn.disabled = false;
+          btn.textContent = '🔗 Get Pairing Code';
+          lastSessionsJson = ''; // Force refresh sessions list
+          loadSessions();
+        } else if (mySession && mySession.error) {
+          clearInterval(interval);
+          showMsg(msgEl, 'err', mySession.error);
+          btn.disabled = false;
+          btn.textContent = '🔗 Get Pairing Code';
+        }
+      } catch (err) {
+        console.error(err);
+      }
+    }, 1000);
 
   } catch(e) {
     showMsg(msgEl, 'err', '❌ ' + e.message);
-  } finally {
     btn.disabled = false;
     btn.textContent = '🔗 Get Pairing Code';
   }
@@ -1249,7 +1287,7 @@ app.post('/api/pair-new', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Invalid phone number. Country code ke sath dalein (bina + ke).' });
     }
     
-    // Agar user ne sirf 10 digit dala hai, toh automatically 91 laga do
+    // Auto-add 91 if only 10 digits provided (India)
     if (phone.length === 10) {
       phone = '91' + phone;
     }
@@ -1263,36 +1301,11 @@ app.post('/api/pair-new', async (req, res) => {
       s.lastError = e.message;
     });
 
-    // WAIT for code to generate before responding
-    let attempts = 0;
-    const interval = setInterval(() => {
-      attempts++;
-      if (s.pairingCode) {
-        clearInterval(interval);
-        res.json({ success: true, code: s.pairingCode, id });
-      } else if (s.lastError) {
-        clearInterval(interval);
-        res.status(400).json({ success: false, error: s.lastError });
-      } else if (attempts > 20) {
-        clearInterval(interval);
-        res.status(500).json({ success: false, error: 'Timeout. Check number or try again.' });
-      }
-    }, 500);
-
+    // Return ID immediately, frontend will poll for the code
+    res.json({ success: true, id });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
-});
-
-// -------- Session create (fallback for old UI) --------
-app.post('/api/sessions/create', (req, res) => {
-  const { id } = req.body;
-  if (!id || !/^[a-zA-Z0-9_]+$/.test(id)) {
-    return res.status(400).json({ success: false, error: 'Invalid name (letters/numbers/_ only)' });
-  }
-  if (sessions.has(id)) return res.status(400).json({ success: false, error: 'Session already exists' });
-  ensureSession(id);
-  res.json({ success: true, id });
 });
 
 // -------- Session list --------
@@ -1307,28 +1320,6 @@ app.get('/api/sessions', (req, res) => {
     error: s.lastError,
   }));
   res.json({ success: true, sessions: list });
-});
-
-// -------- Pair session (for manual) --------
-app.post('/api/sessions/:id/pair', async (req, res) => {
-  const id = req.params.id;
-  const { phone } = req.body;
-  if (!phone || !/^\d{10,15}$/.test(phone)) {
-    return res.status(400).json({ success: false, error: 'Invalid phone number' });
-  }
-  const s = sessions.get(id);
-  if (!s) return res.status(404).json({ success: false, error: 'Session not found' });
-  if (s.isPaired) return res.status(400).json({ success: false, error: 'Already paired. Logout first.' });
-  if (s.isConnecting) return res.status(400).json({ success: false, error: 'Connection in progress. Wait.' });
-
-  if (fs.existsSync(s.authDir)) fs.rmSync(s.authDir, { recursive: true, force: true });
-
-  connectSession(id, phone).catch((e) => {
-    console.error('Connect failed:', e.message);
-    s.lastError = e.message;
-  });
-
-  res.json({ success: true, message: 'Pairing initiated' });
 });
 
 // -------- Logout session --------
