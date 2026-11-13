@@ -109,12 +109,14 @@ class WhatsAppSession {
     for (let attempt = 0; attempt <= SEND_RETRY; attempt++) {
       try {
         if (!this.isSocketReady()) throw new Error('socket not ready');
-        await this.sock.sendMessage(jid, { text });
+        await Promise.race([
+          this.sock.sendMessage(jid, { text }),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('Send timeout')), 15000))
+        ]);
         return { ok: true };
       } catch (e) {
         lastErr = e;
         if (attempt < SEND_RETRY) {
-          this.pushLog('warn', `Retry ${attempt + 1}/${SEND_RETRY} → ${jid}: ${e.message}`);
           await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
         }
       }
@@ -125,19 +127,19 @@ class WhatsAppSession {
   async runWorker() {
     if (this.bulkState.workerAlive) return;
     this.bulkState.workerAlive = true;
-    this.pushLog('info', 'Background Live Worker started — 24/7 continuous mode active');
+    this.pushLog('info', `Background Precise Worker started — Exact ${this.bulkState.delayMs / 1000}s interval active`);
 
     try {
       while (!this.bulkState.stopFlag) {
         this.bulkState.lastBeat = Date.now();
 
         if (!this.isSocketReady()) {
-          await new Promise((r) => setTimeout(r, 3000));
+          await new Promise((r) => setTimeout(r, 2000));
           continue;
         }
 
         if (!this.bulkState.messages.length || !this.bulkState.targets.length) {
-          await new Promise((r) => setTimeout(r, 2000));
+          await new Promise((r) => setTimeout(r, 1000));
           continue;
         }
 
@@ -153,13 +155,15 @@ class WhatsAppSession {
             this.bulkState.lastBeat = Date.now();
 
             if (!this.isSocketReady()) {
-              this.pushLog('warn', 'Socket temporary drop — pausing until reconnection...');
+              this.pushLog('warn', 'Socket drop detected — waiting for reconnection...');
               while (!this.isSocketReady() && !this.bulkState.stopFlag) {
-                await new Promise((r) => setTimeout(r, 3000));
+                await new Promise((r) => setTimeout(r, 2000));
               }
             }
 
             if (this.bulkState.stopFlag) break;
+
+            const startTime = Date.now();
 
             try {
               const res = await this.safeSend(t.jid, msg);
@@ -172,13 +176,15 @@ class WhatsAppSession {
               }
             } catch (e) {
               this.bulkState.failed++;
-              this.pushLog('err', `Unexpected send error → ${t.label}: ${e.message}`);
+              this.pushLog('err', `Send error → ${t.label}: ${e.message}`);
             }
 
             this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
 
             if (!this.bulkState.stopFlag) {
-              await new Promise((r) => setTimeout(r, this.bulkState.delayMs));
+              const elapsed = Date.now() - startTime;
+              const remainingWait = Math.max(100, this.bulkState.delayMs - elapsed);
+              await new Promise((r) => setTimeout(r, remainingWait));
             }
           }
           if (this.bulkState.stopFlag) break;
@@ -189,23 +195,18 @@ class WhatsAppSession {
           this.bulkState.remaining = this.bulkState.messages.length;
           this.bulkState.msgIndex = 0;
           this.bulkState.targetIndex = 0;
-          this.pushLog('info', `Cycle ${this.bulkState.cycle} finished successfully — looping back to Message 1.`);
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed — looping seamlessly.`);
         }
       }
     } catch (loopErr) {
-      this.pushLog('err', 'Worker unexpected exception: ' + loopErr.message);
+      this.pushLog('err', 'Worker exception: ' + loopErr.message);
     } finally {
       this.bulkState.workerAlive = false;
-      if (this.bulkState.stopFlag) {
-        this.bulkState.running = false;
-        this.bulkState.stopFlag = false;
-        this.bulkState.currentMessage = '';
-        this.bulkState.currentTarget = '';
-        this.pushLog('warn', `Task explicitly stopped. Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}`);
-      } else if (this.bulkState.running) {
-        this.pushLog('warn', 'Worker heartbeat restarting loop instantly...');
-        setTimeout(() => this.runWorker(), 1000);
-      }
+      this.bulkState.running = false;
+      this.bulkState.stopFlag = false;
+      this.bulkState.currentMessage = '';
+      this.bulkState.currentTarget = '';
+      this.pushLog('warn', `Task fully stopped. Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}`);
     }
   }
 
@@ -289,12 +290,10 @@ class WhatsAppSession {
             try {
               const groups = this.getGroupsFromStore();
               groups.forEach((g) => { this.groupsCache[g.id] = g; });
-              this.pushLog('info', `Loaded ${groups.length} groups into cache`);
             } catch (e) {}
           }, 3000);
 
           if (this.bulkState.running && !this.bulkState.workerAlive) {
-            this.pushLog('info', 'Socket reopened — resuming background loop');
             this.runWorker();
           }
         }
@@ -314,9 +313,7 @@ class WhatsAppSession {
             this.pairingCode = null;
             this.pairingRequested = false;
             this.currentPhone = null;
-            if (this.bulkState.running) {
-              this.bulkState.stopFlag = true;
-            }
+            this.bulkState.stopFlag = true;
           }
         }
       });
@@ -328,10 +325,8 @@ class WhatsAppSession {
   }
 
   async logout() {
-    if (this.bulkState.running) {
-      this.bulkState.stopFlag = true;
-      this.pushLog('warn', 'Logout — stopping worker');
-    }
+    this.bulkState.stopFlag = true;
+    this.bulkState.running = false;
     if (this.sock) { try { await this.sock.logout(); } catch (_) {} }
     if (fs.existsSync(this.authDir)) fs.rmSync(this.authDir, { recursive: true, force: true });
     this.isPaired = false;
@@ -350,7 +345,7 @@ class WhatsAppSession {
 setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
-      sess.pushLog('warn', 'Watchdog triggered: reviving sleeping worker...');
+      sess.pushLog('warn', 'Watchdog triggered: reviving worker...');
       sess.bulkState.workerAlive = false;
       sess.runWorker();
     }
@@ -626,7 +621,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         </div>
       </div>
       <div class="field" style="margin-top:12px">
-        <label>Session Security Password (Required to manage this session)</label>
+        <label>Session Security Password (Required for controlling session)</label>
         <input id="sessionPassword" type="password" placeholder="Enter session password..." oninput="savePassword()"/>
       </div>
     </div>
@@ -643,6 +638,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
       <div id="errBox" class="msg err hidden"></div>
     </div>
 
+    <!-- FIXED: Always visible directly without hiding bugs -->
     <div class="card" id="pairCard">
       <h2><span class="dot"></span>Pair WhatsApp</h2>
       <label>Phone Number (country code, no + or spaces)</label>
@@ -850,6 +846,7 @@ function onSessionChange(){
   renderDashGroups();
   renderBulkGroups();
   clearLog();
+  pollStatus();
 }
 
 function syncSessionDropdowns(val){
@@ -862,6 +859,7 @@ function syncSessionDropdowns(val){
   renderDashGroups();
   renderBulkGroups();
   clearLog();
+  pollStatus();
 }
 
 async function createNewSessionPrompt(){
@@ -1087,12 +1085,12 @@ async function startServer(){
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
 
-  log('info','Starting 24/7 continuous task for session: '+currentSession);
+  log('info','Starting precise 24/7 loop for session: '+currentSession);
   try{
     const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
-    log('ok','Task running 24/7 successfully — '+d.total+' messages');
+    log('ok','Task running with exact delay — '+d.total+' messages');
     stopBtn.disabled=false;
   }catch(e){
     log('err','Start failed: '+e.message);
@@ -1130,20 +1128,24 @@ async function pollStatus(){
     infoPhone.textContent=d.phone||'—';
     infoTime.textContent=d.connectedAt?new Date(d.connectedAt).toLocaleString():'—';
     
+    // FIXED: Always ensure pairCard is displayed cleanly
+    pairCard.classList.remove('hidden');
+
     if(d.paired){
       badge.textContent='Paired';badge.className='badge b-paired';
-      codeSection.classList.add('hidden');pairCard.classList.add('hidden');
+      codeSection.classList.add('hidden');
+      phoneInput.disabled=true;pairBtn.disabled=true;
     }else if(d.code){
       badge.textContent='Waiting for pairing';badge.className='badge b-wait';
       codeSection.classList.remove('hidden');
       codeValue.textContent=d.code;codeValue.classList.remove('loading');
-      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
+      phoneInput.disabled=true;pairBtn.disabled=true;
     }else if(d.connecting){
       badge.textContent='Connecting';badge.className='badge b-wait';
-      pairCard.classList.remove('hidden');phoneInput.disabled=true;pairBtn.disabled=true;
+      codeSection.classList.add('hidden');
+      phoneInput.disabled=true;pairBtn.disabled=true;
     }else{
       badge.textContent='Idle';badge.className='badge b-idle';
-      pairCard.classList.remove('hidden');
       codeSection.classList.add('hidden');
       phoneInput.disabled=false;pairBtn.disabled=false;
     }
@@ -1215,7 +1217,6 @@ app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
 
 const upload = multer({ dest: 'uploads/' });
 
-// In-memory secure passwords for sessions
 const sessionPasswords = {};
 
 app.get('/api/sessions', (req, res) => {
@@ -1237,7 +1238,6 @@ app.post('/api/sessions/create', (req, res) => {
 
 function verifyAuth(session, pwd) {
   const clean = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  // If no password was ever set for this session, allow first access and set it
   if (!sessionPasswords[clean]) {
     if (pwd) sessionPasswords[clean] = pwd;
     return true;
@@ -1469,7 +1469,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     sess.bulkState.workerAlive = false;
     sess.bulkState.lastBeat = Date.now();
 
-    sess.pushLog('info', `24/7 Task launched — ${messages.length} messages × ${targets.length} targets`);
+    sess.pushLog('info', `Precise Loop launched — ${messages.length} messages × ${targets.length} targets with exact ${delaySec}s gap`);
 
     sess.runWorker();
 
@@ -1488,6 +1488,7 @@ app.post('/api/bulk/stop', (req, res) => {
   const sess = getOrCreateSession(session);
   if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No task running' });
   sess.bulkState.stopFlag = true;
+  sess.bulkState.running = false;
   sess.pushLog('warn', 'Emergency stop signal received from authorized user');
   res.json({ success: true });
 });
@@ -1518,7 +1519,7 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Secure Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🌐 Final Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.exit = process.exit || (() => {});
