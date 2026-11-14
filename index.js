@@ -128,7 +128,7 @@ class WhatsAppSession {
   async runWorker() {
     if (this.bulkState.workerAlive) return;
     this.bulkState.workerAlive = true;
-    this.pushLog('info', `Pro Matrix Worker Started — Interval: ${this.bulkState.delayMs / 1000}s`);
+    this.pushLog('info', `Pro Cyber Engine Active — Interval: ${this.bulkState.delayMs / 1000}s`);
 
     try {
       while (!this.bulkState.stopFlag) {
@@ -156,7 +156,7 @@ class WhatsAppSession {
             this.bulkState.lastBeat = Date.now();
 
             if (!this.isSocketReady()) {
-              this.pushLog('warn', 'Socket link lost — waiting for automatic healing...');
+              this.pushLog('warn', 'Socket link unstable — auto-healing connection...');
               while (!this.isSocketReady() && !this.bulkState.stopFlag) {
                 await new Promise((r) => setTimeout(r, 2000));
               }
@@ -177,7 +177,7 @@ class WhatsAppSession {
               }
             } catch (e) {
               this.bulkState.failed++;
-              this.pushLog('err', `Execution Exception → Target: ${t.label}: ${e.message}`);
+              this.pushLog('err', `Dispatch Exception → Target: ${t.label}: ${e.message}`);
             }
 
             this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
@@ -196,18 +196,18 @@ class WhatsAppSession {
           this.bulkState.remaining = this.bulkState.messages.length;
           this.bulkState.msgIndex = 0;
           this.bulkState.targetIndex = 0;
-          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed successfully. Looping infinitely...`);
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} finished. Seamless loop continuing...`);
         }
       }
     } catch (loopErr) {
-      this.pushLog('err', 'Worker crash prevented: ' + loopErr.message);
+      this.pushLog('err', 'Worker safeguard caught exception: ' + loopErr.message);
     } finally {
       this.bulkState.workerAlive = false;
       this.bulkState.running = false;
       this.bulkState.stopFlag = false;
       this.bulkState.currentMessage = '';
       this.bulkState.currentTarget = '';
-      this.pushLog('warn', `Worker session terminated safely. Total Sent: ${this.bulkState.sent}`);
+      this.pushLog('warn', `Worker session safely halted. Total Sent: ${this.bulkState.sent}`);
     }
   }
 
@@ -234,7 +234,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        // BULLETPROOF FIX: Ubuntu Chrome browser string to bypass pairing rejections
+        // FIX: Ubuntu Chrome browser signature avoids "Couldn't link device" rejection[span_0](start_span)[span_0](end_span)
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
@@ -245,7 +245,7 @@ class WhatsAppSession {
 
       this.sock.ev.on('creds.update', saveCreds);
 
-      // Instant Pairing Code Request Trigger
+      // Instant stable pairing trigger
       if (!state.creds.registered && !this.pairingRequested) {
         this.pairingRequested = true;
         setTimeout(async () => {
@@ -254,10 +254,10 @@ class WhatsAppSession {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pushLog('info', `Pairing Code Generated Successfully: ${this.pairingCode}`);
+            this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
-            this.pushLog('err', 'Pairing Handshake Error: ' + err.message);
+            this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -313,7 +313,7 @@ class WhatsAppSession {
         if (connection === 'close') {
           const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-          this.pushLog('warn', `Connection stream closed with code ${statusCode}`);
+          this.pushLog('warn', `Connection stream closed (Code: ${statusCode})`);
 
           this.isPaired = false;
           this.isConnecting = false;
@@ -350,14 +350,14 @@ class WhatsAppSession {
     this.lastError = null;
     this.sock = null;
     this.groupsCache = {};
-    this.pushLog('warn', 'Session wiped and logged out completely');
+    this.pushLog('warn', 'Session wiped and logged out');
   }
 }
 
 setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
-      sess.pushLog('warn', 'Watchdog Recovery: reviving background matrix thread...');
+      sess.pushLog('warn', 'Watchdog: Reviving frozen background worker...');
       sess.bulkState.workerAlive = false;
       sess.runWorker();
     }
@@ -388,126 +388,126 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD — Pro Matrix Center</title>
+<title>RK RAJA XWD — Elite Cyber Matrix Pro</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
-  body{font-family:'Rajdhani',sans-serif;background:#020205;color:#e2e8f0;min-height:100vh;overflow-x:hidden;position:relative}
-  .matrix-bg{position:fixed;inset:0;z-index:-3;pointer-events:none;background:#020205;overflow:hidden}
-  .matrix-bg::before{content:"";position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 50% 50%, rgba(255,0,85,0.15) 0%, rgba(5,2,20,0.9) 50%, transparent 75%);animation:matrixGlow 12s linear infinite}
-  @keyframes matrixGlow{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-  .cyber-grid{position:fixed;inset:0;z-index:-2;pointer-events:none;background-image:linear-gradient(rgba(255,0,85,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,0,85,0.06) 1px, transparent 1px);background-size:35px 35px;animation:gridMove 25s linear infinite}
-  @keyframes gridMove{0%{background-position:0 0}100%{background-position:35px 35px}}
-  .orb-container{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
-  .neon-orb{position:absolute;border-radius:50%;filter:blur(100px);opacity:0.45;animation:orbFloat 8s ease-in-out infinite alternate}
-  .neon-orb:nth-child(1){top:5%;left:10%;width:350px;height:350px;background:#ff0055;animation-delay:0s}
-  .neon-orb:nth-child(2){bottom:5%;right:10%;width:400px;height:400px;background:#7000ff;animation-delay:2s}
-  @keyframes orbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(30px,40px) scale(1.2)}}
-  .container{max-width:1200px;margin:0 auto;padding:30px 18px 70px;position:relative;z-index:1}
-  .brand{text-align:center;margin-bottom:28px}
-  .brand h1{font-size:clamp(28px,5vw,46px);font-weight:900;letter-spacing:5px;background:linear-gradient(180deg,#ffffff 0%,#f0f0f5 40%,#ff0055 120%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 40px rgba(255,0,85,0.7);font-family:'Orbitron',sans-serif}
-  .brand h1 .x{color:#ff0055;-webkit-text-fill-color:#ff0055;text-shadow:0 0 25px #ff0055}
-  .brand p{color:#94a3b8;font-size:12px;letter-spacing:5px;margin-top:6px;text-transform:uppercase;font-weight:700}
-  .tabs{display:flex;gap:14px;margin-bottom:26px;flex-wrap:wrap;justify-content:center}
-  .tab{padding:13px 28px;border-radius:14px;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;border:1px solid rgba(255,0,85,0.45);background:rgba(255,0,85,0.06);color:#ff5288;transition:all 0.3s ease;font-family:'Orbitron',sans-serif;backdrop-filter:blur(12px)}
-  .tab.active{background:linear-gradient(135deg,#ff0055,#990033);color:#fff;border-color:#ff0055;box-shadow:0 0 30px rgba(255,0,85,0.7), inset 0 1px 0 rgba(255,255,255,0.4)}
-  .tab:hover:not(.active){background:rgba(255,0,85,0.18);color:#fff;box-shadow:0 0 20px rgba(255,0,85,0.4)}
+  body{font-family:'Rajdhani',sans-serif;background:#05050a;color:#f1f5f9;min-height:100vh;overflow-x:hidden;position:relative}
+  .cyber-bg{position:fixed;inset:0;z-index:-3;pointer-events:none;background:#05050a;overflow:hidden}
+  .cyber-bg::before{content:"";position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 50% 50%, rgba(16,185,129,0.12) 0%, rgba(5,5,10,0.92) 55%, transparent 80%);animation:pulseGlow 14s linear infinite}
+  @keyframes pulseGlow{0%{transform:rotate(0deg) scale(1)}50%{transform:rotate(180deg) scale(1.1)}100%{transform:rotate(360deg) scale(1)}}
+  .matrix-grid{position:fixed;inset:0;z-index:-2;pointer-events:none;background-image:linear-gradient(rgba(16,185,129,0.05) 1px, transparent 1px), linear-gradient(90deg, rgba(16,185,129,0.05) 1px, transparent 1px);background-size:40px 40px;animation:gridMove 30s linear infinite}
+  @keyframes gridMove{0%{background-position:0 0}100%{background-position:40px 40px}}
+  .orb-field{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+  .neon-glow{position:absolute;border-radius:50%;filter:blur(110px);opacity:0.4;animation:orbDrift 10s ease-in-out infinite alternate}
+  .neon-glow:nth-child(1){top:10%;left:15%;width:350px;height:350px;background:#10b981;animation-delay:0s}
+  .neon-glow:nth-child(2){bottom:10%;right:15%;width:420px;height:420px;background:#3b82f6;animation-delay:3s}
+  @keyframes orbDrift{0%{transform:translate(0,0)}100%{transform:translate(45px,55px)}}
+  .container{max-width:1220px;margin:0 auto;padding:32px 18px 75px;position:relative;z-index:1}
+  .brand{text-align:center;margin-bottom:30px}
+  .brand h1{font-size:clamp(30px,5.2vw,50px);font-weight:900;letter-spacing:6px;background:linear-gradient(180deg,#ffffff 0%,#e2e8f0 40%,#10b981 120%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 40px rgba(16,185,129,0.6);font-family:'Orbitron',sans-serif}
+  .brand h1 .x{color:#10b981;-webkit-text-fill-color:#10b981;text-shadow:0 0 25px #10b981}
+  .brand p{color:#94a3b8;font-size:12px;letter-spacing:6px;margin-top:6px;text-transform:uppercase;font-weight:700}
+  .tabs{display:flex;gap:14px;margin-bottom:28px;flex-wrap:wrap;justify-content:center}
+  .tab{padding:14px 30px;border-radius:14px;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;border:1px solid rgba(16,185,129,0.4);background:rgba(16,185,129,0.05);color:#34d399;transition:all 0.3s ease;font-family:'Orbitron',sans-serif;backdrop-filter:blur(12px)}
+  .tab.active{background:linear-gradient(135deg,#10b981,#047857);color:#05050a;border-color:#10b981;box-shadow:0 0 30px rgba(16,185,129,0.7), inset 0 1px 0 rgba(255,255,255,0.4);font-weight:900}
+  .tab:hover:not(.active){background:rgba(16,185,129,0.15);color:#fff;box-shadow:0 0 20px rgba(16,185,129,0.35)}
   .panel{display:none}
   .panel.active{display:block;animation:fadeIn 0.4s cubic-bezier(0.16,1,0.3,1)}
   @keyframes fadeIn{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}
-  .layout{display:grid;grid-template-columns:420px 1fr;gap:22px}
-  @media(max-width:920px){.layout{grid-template-columns:1fr}}
-  .card{position:relative;background:linear-gradient(145deg, rgba(16,16,24,0.9), rgba(8,8,14,0.95));border:1px solid rgba(255,0,85,0.35);border-radius:22px;padding:26px;margin-bottom:22px;backdrop-filter:blur(25px);box-shadow:0 25px 60px rgba(0,0,0,0.8), 0 0 35px rgba(255,0,85,0.12)}
-  .card::after{content:"";position:absolute;inset:0;border-radius:22px;pointer-events:none;border:1px solid rgba(255,255,255,0.06)}
+  .layout{display:grid;grid-template-columns:430px 1fr;gap:24px}
+  @media(max-width:940px){.layout{grid-template-columns:1fr}}
+  .card{position:relative;background:linear-gradient(145deg, rgba(15,23,42,0.88), rgba(2,6,23,0.95));border:1px solid rgba(16,185,129,0.3);border-radius:24px;padding:28px;margin-bottom:24px;backdrop-filter:blur(25px);box-shadow:0 30px 70px rgba(0,0,0,0.85), 0 0 40px rgba(16,185,129,0.08)}
+  .card::after{content:"";position:absolute;inset:0;border-radius:24px;pointer-events:none;border:1px solid rgba(255,255,255,0.06)}
   .card h2{font-size:15px;margin-bottom:20px;color:#fff;letter-spacing:2px;display:flex;align-items:center;gap:12px;text-transform:uppercase;font-family:'Orbitron',sans-serif}
-  .card h2 .dot{width:10px;height:10px;border-radius:50%;background:#ff0055;box-shadow:0 0 18px #ff0055, 0 0 6px #fff}
+  .card h2 .dot{width:10px;height:10px;border-radius:50%;background:#10b981;box-shadow:0 0 18px #10b981, 0 0 6px #fff}
   label{display:block;font-size:11px;color:#94a3b8;margin-bottom:8px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700}
-  input,textarea,select{width:100%;background:rgba(2,2,6,0.95);border:1px solid rgba(255,0,85,0.4);border-radius:14px;padding:13px 18px;color:#f8fafc;font-size:14px;font-family:inherit;outline:none;transition:all 0.3s ease}
-  input:focus,textarea:focus,select:focus{border-color:#ff0055;box-shadow:0 0 0 3px rgba(255,0,85,0.3), 0 0 30px rgba(255,0,85,0.4)}
+  input,textarea,select{width:100%;background:rgba(2,6,23,0.95);border:1px solid rgba(16,185,129,0.35);border-radius:14px;padding:14px 18px;color:#f8fafc;font-size:14px;font-family:inherit;outline:none;transition:all 0.3s ease}
+  input:focus,textarea:focus,select:focus{border-color:#10b981;box-shadow:0 0 0 3px rgba(16,185,129,0.25), 0 0 30px rgba(16,185,129,0.35)}
   input:disabled{color:#475569;cursor:not-allowed}
   textarea{resize:vertical;min-height:100px}
   .field{margin-bottom:18px}
-  button{background:linear-gradient(135deg,#ff0055,#990033);color:#fff;border:none;border-radius:14px;padding:15px 26px;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:all 0.3s ease;margin-top:6px;width:100%;box-shadow:0 10px 30px rgba(255,0,85,0.4), inset 0 1px 0 rgba(255,255,255,0.35);font-family:'Orbitron',sans-serif}
-  button:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 15px 40px rgba(255,0,85,0.7), 0 0 25px rgba(255,0,85,0.5)}
-  button:disabled{background:#1e1e2d;color:#475569;cursor:not-allowed;box-shadow:none}
-  button.ghost{background:transparent;border:1px solid rgba(255,0,85,0.6);color:#ff5288;box-shadow:none}
-  button.ghost:hover:not(:disabled){background:rgba(255,0,85,0.18);color:#fff}
-  button.danger{background:linear-gradient(135deg,#ff0033,#700018);border:1px solid #ff0055;box-shadow:0 10px 30px rgba(255,0,51,0.5)}
+  button{background:linear-gradient(135deg,#10b981,#047857);color:#05050a;border:none;border-radius:14px;padding:15px 26px;font-size:12px;font-weight:800;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:all 0.3s ease;margin-top:6px;width:100%;box-shadow:0 10px 30px rgba(16,185,129,0.4), inset 0 1px 0 rgba(255,255,255,0.4);font-family:'Orbitron',sans-serif}
+  button:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 15px 40px rgba(16,185,129,0.7), 0 0 25px rgba(16,185,129,0.5)}
+  button:disabled{background:#1e293b;color:#475569;cursor:not-allowed;box-shadow:none}
+  button.ghost{background:transparent;border:1px solid rgba(16,185,129,0.5);color:#34d399;box-shadow:none}
+  button.ghost:hover:not(:disabled){background:rgba(16,185,129,0.15);color:#fff}
+  button.danger{background:linear-gradient(135deg,#ef4444,#991b1b);color:#fff;border:1px solid #ef4444;box-shadow:0 10px 30px rgba(239,68,68,0.4)}
   .btnrow{display:flex;gap:14px}
   .btnrow button{margin-top:0}
   .status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:12px;flex-wrap:wrap}
   .badge{display:inline-block;padding:8px 20px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:'Orbitron',sans-serif}
   .b-idle{background:rgba(100,116,139,0.15);color:#94a3b8;border:1px solid rgba(100,116,139,0.4)}
   .b-wait{background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.5);animation:pulse 1.6s infinite}
-  .b-paired{background:rgba(255,0,85,0.15);color:#ff5288;border:1px solid rgba(255,0,85,0.65);box-shadow:0 0 25px rgba(255,0,85,0.35)}
-  .b-run{background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.65);box-shadow:0 0 25px rgba(16,185,129,0.4);animation:pulse 1.6s infinite}
+  .b-paired{background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.65);box-shadow:0 0 25px rgba(16,185,129,0.35)}
+  .b-run{background:rgba(59,130,246,0.15);color:#60a5fa;border:1px solid rgba(59,130,246,0.65);box-shadow:0 0 25px rgba(59,130,246,0.4);animation:pulse 1.6s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-  .code-box{background:rgba(2,2,6,0.98);border:2px dashed #ff0055;border-radius:18px;padding:30px 22px;margin:22px 0;text-align:center;box-shadow:inset 0 0 40px rgba(255,0,85,0.2), 0 0 30px rgba(255,0,85,0.3)}
+  .code-box{background:rgba(2,6,23,0.98);border:2px dashed #10b981;border-radius:18px;padding:32px 22px;margin:22px 0;text-align:center;box-shadow:inset 0 0 40px rgba(16,185,129,0.2), 0 0 30px rgba(16,185,129,0.3)}
   .code-label{font-size:11px;color:#94a3b8;letter-spacing:3px;margin-bottom:12px;text-transform:uppercase;font-weight:700}
-  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff0055;font-family:'Orbitron',monospace;text-shadow:0 0 30px rgba(255,0,85,0.9)}
+  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#10b981;font-family:'Orbitron',monospace;text-shadow:0 0 30px rgba(16,185,129,0.9)}
   .code-value.loading{font-size:16px;letter-spacing:1px;color:#94a3b8;font-style:italic;text-shadow:none}
-  .steps{background:rgba(2,2,6,0.7);border:1px solid rgba(255,0,85,0.3);border-radius:16px;padding:20px;font-size:13px;line-height:2.1;color:#cbd5e1}
+  .steps{background:rgba(2,6,23,0.75);border:1px solid rgba(16,185,129,0.3);border-radius:16px;padding:20px;font-size:13px;line-height:2.1;color:#cbd5e1}
   .steps b{color:#fff}
   .msg{margin-top:14px;padding:14px 18px;border-radius:14px;font-size:13px;display:none}
-  .msg.ok{background:rgba(255,0,85,0.14);color:#ff99bb;border:1px solid rgba(255,0,85,0.45);display:block}
+  .msg.ok{background:rgba(16,185,129,0.14);color:#6ee7b7;border:1px solid rgba(16,185,129,0.45);display:block}
   .msg.err{background:rgba(239,68,68,0.14);color:#fca5a5;border:1px solid rgba(239,68,68,0.45);display:block}
   .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
   @media(max-width:540px){.grid2{grid-template-columns:1fr}}
-  .stat{background:rgba(2,2,6,0.75);border:1px solid rgba(255,0,85,0.3);border-radius:18px;padding:18px;text-align:center}
+  .stat{background:rgba(2,6,23,0.8);border:1px solid rgba(16,185,129,0.3);border-radius:18px;padding:18px;text-align:center}
   .stat .k{font-size:10px;color:#94a3b8;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;font-weight:700}
-  .stat .v{font-size:26px;font-weight:900;color:#fff;text-shadow:0 0 18px rgba(255,0,85,0.5);word-break:break-all;font-family:'Orbitron',sans-serif}
-  .stat .v.red{color:#ff0055}
-  .stat .v.green{color:#34d399;text-shadow:0 0 18px rgba(52,211,153,0.6)}
+  .stat .v{font-size:26px;font-weight:900;color:#fff;text-shadow:0 0 18px rgba(16,185,129,0.5);word-break:break-all;font-family:'Orbitron',sans-serif}
+  .stat .v.emerald{color:#10b981}
+  .stat .v.blue{color:#3b82f6;text-shadow:0 0 18px rgba(59,130,246,0.6)}
   .stat .v.small{font-size:14px;font-weight:700}
   .statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px}
   @media(max-width:540px){.statgrid{grid-template-columns:1fr 1fr}}
-  .log{background:#010104;border:1px solid rgba(255,0,85,0.4);border-radius:18px;padding:18px;height:360px;overflow-y:auto;font-family:'Courier New',monospace;font-size:12px;line-height:1.9;box-shadow:inset 0 0 45px rgba(255,0,85,0.1)}
+  .log{background:#020617;border:1px solid rgba(16,185,129,0.4);border-radius:18px;padding:18px;height:360px;overflow-y:auto;font-family:'Courier New',monospace;font-size:12px;line-height:1.9;box-shadow:inset 0 0 45px rgba(16,185,129,0.1)}
   .log::-webkit-scrollbar{width:8px}
-  .log::-webkit-scrollbar-track{background:#04040a}
-  .log::-webkit-scrollbar-thumb{background:#ff0055;border-radius:8px}
+  .log::-webkit-scrollbar-track{background:#020617}
+  .log::-webkit-scrollbar-thumb{background:#10b981;border-radius:8px}
   .log .line{color:#94a3b8;border-bottom:1px dashed rgba(255,255,255,0.05);padding:4px 0;word-break:break-all}
-  .log .t{color:#ff5288;margin-right:8px;font-weight:bold}
+  .log .t{color:#34d399;margin-right:8px;font-weight:bold}
   .log .ok{color:#34d399}
   .log .err{color:#f87171}
   .log .info{color:#38bdf8}
   .log .warn{color:#fbbf24}
-  .progress{height:12px;background:rgba(2,2,6,0.95);border-radius:99px;overflow:hidden;border:1px solid rgba(255,0,85,0.4);margin-top:16px}
-  .progress > div{height:100%;width:0%;background:linear-gradient(90deg,#ff0055,#ff758c,#ff0055);background-size:200% 100%;transition:width 0.4s ease;animation:shine 2s linear infinite}
+  .progress{height:12px;background:rgba(2,6,23,0.95);border-radius:99px;overflow:hidden;border:1px solid rgba(16,185,129,0.4);margin-top:16px}
+  .progress > div{height:100%;width:0%;background:linear-gradient(90deg,#10b981,#3b82f6,#10b981);background-size:200% 100%;transition:width 0.4s ease;animation:shine 2s linear infinite}
   @keyframes shine{0%{background-position:0 0}100%{background-position:200% 0}}
   .groups-toolbar{display:flex;gap:12px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
   .groups-toolbar button{width:auto;margin-top:0;padding:11px 18px;font-size:11px}
   .groups-toolbar .count{font-size:12px;color:#94a3b8;margin-left:auto;letter-spacing:1px;font-weight:700}
-  .groups-list{background:rgba(2,2,6,0.8);border:1px solid rgba(255,0,85,0.3);border-radius:18px;max-height:380px;overflow-y:auto;padding:10px}
+  .groups-list{background:rgba(2,6,23,0.85);border:1px solid rgba(16,185,129,0.3);border-radius:18px;max-height:380px;overflow-y:auto;padding:10px}
   .groups-list::-webkit-scrollbar{width:8px}
-  .groups-list::-webkit-scrollbar-track{background:#04040a}
-  .groups-list::-webkit-scrollbar-thumb{background:#ff0055;border-radius:8px}
+  .groups-list::-webkit-scrollbar-track{background:#020617}
+  .groups-list::-webkit-scrollbar-thumb{background:#10b981;border-radius:8px}
   .group-item{display:flex;align-items:center;gap:16px;padding:13px 16px;border-radius:14px;cursor:pointer;transition:all 0.2s ease;border:1px solid transparent}
-  .group-item:hover{background:rgba(255,0,85,0.14);border-color:rgba(255,0,85,0.4)}
-  .group-item.selected{background:rgba(255,0,85,0.22);border-color:#ff0055;box-shadow:0 0 20px rgba(255,0,85,0.25)}
-  .group-item input[type=checkbox]{width:20px;height:20px;accent-color:#ff0055;cursor:pointer;flex-shrink:0}
+  .group-item:hover{background:rgba(16,185,129,0.14);border-color:rgba(16,185,129,0.4)}
+  .group-item.selected{background:rgba(16,185,129,0.22);border-color:#10b981;box-shadow:0 0 20px rgba(16,185,129,0.25)}
+  .group-item input[type=checkbox]{width:20px;height:20px;accent-color:#10b981;cursor:pointer;flex-shrink:0}
   .group-info{flex:1;min-width:0}
   .group-name{color:#f8fafc;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
   .group-jid{color:#64748b;font-size:11px;font-family:'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
-  .group-meta{color:#ff5288;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0;font-weight:700}
+  .group-meta{color:#34d399;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0;font-weight:700}
   .hidden{display:none!important}
   .hint{font-size:11px;color:#64748b;margin-top:8px;letter-spacing:0.5px}
   .empty{padding:40px 20px;text-align:center;color:#64748b;font-size:13px}
   .footer{text-align:center;color:#475569;font-size:11px;letter-spacing:4px;margin-top:40px;text-transform:uppercase;font-weight:700}
-  .queue-box{background:rgba(2,2,6,0.95);border:1px solid rgba(255,0,85,0.4);border-radius:16px;padding:16px;margin-top:12px;font-size:12px;color:#cbd5e1;max-height:160px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.8}
+  .queue-box{background:rgba(2,6,23,0.95);border:1px solid rgba(16,185,129,0.4);border-radius:16px;padding:16px;margin-top:12px;font-size:12px;color:#cbd5e1;max-height:160px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.8}
   .queue-box .qi{color:#38bdf8;margin-right:8px;font-weight:bold}
 </style>
 </head>
 <body>
 
-<div class="matrix-bg"></div>
-<div class="cyber-grid"></div>
-<div class="orb-container"><div class="neon-orb"></div><div class="neon-orb"></div></div>
+<div class="cyber-bg"></div>
+<div class="matrix-grid"></div>
+<div class="orb-field"><div class="neon-glow"></div><div class="neon-glow"></div></div>
 
 <div class="container">
   <div class="brand">
     <h1>RK <span class="x">X</span> RAJA</h1>
-    <p>Pro Matrix Center</p>
+    <p>Elite Cyber Matrix Pro Console</p>
   </div>
 
   <div class="tabs">
@@ -652,11 +652,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
           <div class="statgrid">
             <div class="stat"><div class="k">Status</div><div class="v" id="statStatus">Idle</div></div>
             <div class="stat"><div class="k">Paired</div><div class="v" id="statPaired">—</div></div>
-            <div class="stat"><div class="k">Uptime</div><div class="v red" id="statUptime">00:00:00</div></div>
+            <div class="stat"><div class="k">Uptime</div><div class="v emerald" id="statUptime">00:00:00</div></div>
           </div>
           <div class="statgrid">
-            <div class="stat"><div class="k">Sent</div><div class="v green" id="statSent">0</div></div>
-            <div class="stat"><div class="k">Failed</div><div class="v red" id="statFailed">0</div></div>
+            <div class="stat"><div class="k">Sent</div><div class="v blue" id="statSent">0</div></div>
+            <div class="stat"><div class="k">Failed</div><div class="v" style="color:#ef4444" id="statFailed">0</div></div>
             <div class="stat"><div class="k">Cycle</div><div class="v" id="statCycle">0</div></div>
           </div>
           <div class="statgrid">
@@ -676,7 +676,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Live Matrix Cyber Log</h2>
           <div class="log" id="logBox">
-            <div class="line"><span class="t">[boot]</span> Pro Matrix Multi-Session Core Online. Ready...</div>
+            <div class="line"><span class="t">[boot]</span> Elite Matrix Multi-Session Core Online. Ready...</div>
           </div>
           <div class="btnrow" style="margin-top:16px">
             <button class="ghost" onclick="clearLog()">Clear Log</button>
@@ -687,7 +687,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD 💀 © — Pro Cyber Edition</div>
+  <div class="footer">RK RAJA XWD 💀 © — Elite Pro Cyber Edition</div>
 </div>
 
 <script>
@@ -1379,7 +1379,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     sess.bulkState.workerAlive = false;
     sess.bulkState.lastBeat = Date.now();
 
-    sess.pushLog('info', `24/7 Infinite Matrix Loop launched — ${messages.length} messages × ${targets.length} targets`);
+    sess.pushLog('info', `24/7 Infinite Cyber Loop launched — ${messages.length} messages × ${targets.length} targets`);
 
     sess.runWorker();
 
@@ -1401,7 +1401,7 @@ app.post('/api/bulk/stop', (req, res) => {
   }
   sess.bulkState.stopFlag = true;
   sess.bulkState.running = false;
-  sess.pushLog('warn', 'Emergency stop command executed securely by session owner');
+  sess.pushLog('warn', 'Emergency stop executed securely by session owner');
   res.json({ success: true });
 });
 
@@ -1431,7 +1431,7 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🚀 RK RAJA XWD Pro Cyber Matrix Server Live: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🚀 RK RAJA XWD Elite Pro Cyber Server Live: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.exit = process.exit || (() => {});
