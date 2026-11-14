@@ -26,7 +26,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000;
+const PAIRING_LOCK_MS = 60000; 
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -173,7 +173,7 @@ class WhatsAppSession {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.ubuntu('Chrome'), 
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -229,7 +229,7 @@ class WhatsAppSession {
           this.isPaired = false; 
           this.isConnecting = false;
 
-          if (statusCode === DisconnectReason.restartRequired) {
+          if (statusCode === 515) {
              setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
              return;
           }
@@ -298,6 +298,7 @@ if (fs.existsSync(SESSIONS_BASE_DIR)) {
 }
 if (Object.keys(sessions).length === 0) getOrCreateSession('default');
 
+// ============== HTML UI (RK RAJA XWD) ==============
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1048,11 +1049,8 @@ loadSessions().then(()=>{
 
 const app = express();
 app.use(express.json());
-
 app.get('/', (req, res) => res.type('html').send(DASHBOARD_HTML));
-
 const upload = multer({ dest: 'uploads/' });
-
 const sessionPasswords = {};
 
 app.get('/api/sessions', (req, res) => {
@@ -1065,7 +1063,6 @@ app.post('/api/sessions/create', (req, res) => {
   const { session, password } = req.body;
   if(!session) return res.status(400).json({ success: false, error: 'Session name required' });
   if(!password) return res.status(400).json({ success: false, error: 'Password required' });
-  
   const clean = session.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   sessionPasswords[clean] = password;
   getOrCreateSession(clean);
@@ -1074,289 +1071,116 @@ app.post('/api/sessions/create', (req, res) => {
 
 function verifyAuth(session, pwd) {
   const clean = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  if (!sessionPasswords[clean]) {
-    if (pwd) sessionPasswords[clean] = pwd;
-    return true;
-  }
+  if (!sessionPasswords[clean]) { if (pwd) sessionPasswords[clean] = pwd; return true; }
   return sessionPasswords[clean] === pwd;
 }
 
 app.post('/api/pair', async (req, res) => {
   try {
     const { phone, session, password } = req.body;
-    if (!verifyAuth(session, password)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
-    }
-
+    if (!verifyAuth(session, password)) return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
     const sess = getOrCreateSession(session);
-
-    if (!phone || !/^\d{10,15}$/.test(phone)) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number format' });
-    }
-    if (sess.isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection already in progress' });
-    }
-    
-    if (fs.existsSync(sess.authDir)) {
-      try {
-        fs.rmSync(sess.authDir, { recursive: true, force: true });
-      } catch (e) {}
-    }
-
-    sess.connect(phone, true).catch((e) => {
-      sess.lastError = e.message;
-    });
-
+    if (!phone || !/^\d{10,15}$/.test(phone)) return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+    if (sess.isConnecting) return res.status(400).json({ success: false, error: 'Connection already in progress' });
+    if (fs.existsSync(sess.authDir)) { try { fs.rmSync(sess.authDir, { recursive: true, force: true }); } catch (e) {} }
+    sess.connect(phone, true).catch((e) => { sess.lastError = e.message; });
     res.json({ success: true, message: 'Pairing handshake initialized' });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.get('/api/status', (req, res) => {
   const sessName = req.query.session || 'default';
   const sess = getOrCreateSession(sessName);
-  res.json({
-    paired: sess.isPaired,
-    connecting: sess.isConnecting,
-    code: sess.isPaired ? null : sess.pairingCode,
-    phone: sess.currentPhone,
-    connectedAt: sess.connectedAt,
-    error: sess.lastError,
-  });
+  res.json({ paired: sess.isPaired, connecting: sess.isConnecting, code: sess.isPaired ? null : sess.pairingCode, phone: sess.currentPhone, connectedAt: sess.connectedAt, error: sess.lastError });
 });
 
 app.get('/api/groups', async (req, res) => {
   try {
     const sessName = req.query.session || 'default';
     const pwd = req.query.password;
-    if (!verifyAuth(sessName, pwd)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
-    }
-
+    if (!verifyAuth(sessName, pwd)) return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
     const sess = getOrCreateSession(sessName);
-
-    if (!sess.isPaired || !sess.sock) {
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
-    }
-
-    const map = new Map();
-    Object.values(sess.groupsCache).forEach((g) => map.set(g.id, g));
-
-    try {
-      sess.getGroupsFromStore().forEach((g) => {
-        if (!map.has(g.id)) map.set(g.id, g);
-      });
-    } catch (_) {}
-
+    if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
+    const map = new Map(); Object.values(sess.groupsCache).forEach((g) => map.set(g.id, g));
+    try { sess.getGroupsFromStore().forEach((g) => { if (!map.has(g.id)) map.set(g.id, g); }); } catch (_) {}
     if (map.size === 0 && typeof sess.sock.groupFetchAllParticipating === 'function') {
-      try {
-        const all = await sess.sock.groupFetchAllParticipating();
-        Object.values(all).forEach((g) => {
-          map.set(g.id, {
-            id: g.id,
-            name: g.subject || '',
-            size: g.participants ? g.participants.length : 0,
-          });
-        });
-      } catch (e) {}
+      try { const all = await sess.sock.groupFetchAllParticipating(); Object.values(all).forEach((g) => { map.set(g.id, { id: g.id, name: g.subject || '', size: g.participants ? g.participants.length : 0 }); }); } catch (e) {}
     }
-
-    const groups = [...map.values()]
-      .filter((g) => g.id && g.id.endsWith('@g.us'))
-      .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
-
+    const groups = [...map.values()].filter((g) => g.id && g.id.endsWith('@g.us')).sort((a, b) => (a.name || '').localeCompare(b.name || ''));
     groups.forEach((g) => { sess.groupsCache[g.id] = g; });
-
     res.json({ success: true, groups });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/api/send-groups', async (req, res) => {
   try {
     const { session, password, groupIds, message } = req.body;
-    if (!verifyAuth(session, password)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
-    }
-
+    if (!verifyAuth(session, password)) return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
     const sess = getOrCreateSession(session);
-
     if (!sess.isPaired || !sess.sock) return res.status(400).json({ success: false, error: 'WhatsApp not paired yet' });
-    if (!Array.isArray(groupIds) || !groupIds.length) {
-      return res.status(400).json({ success: false, error: 'No groups selected' });
-    }
-    if (!message || !message.trim()) {
-      return res.status(400).json({ success: false, error: 'Message is required' });
-    }
-
-    let sent = 0, failed = 0;
-    const errors = [];
+    if (!Array.isArray(groupIds) || !groupIds.length) return res.status(400).json({ success: false, error: 'No groups selected' });
+    if (!message || !message.trim()) return res.status(400).json({ success: false, error: 'Message is required' });
+    let sent = 0, failed = 0; const errors = [];
     for (const jid of groupIds) {
-      try {
-        await sess.sock.sendMessage(jid, { text: message });
-        sent++;
-      } catch (e) {
-        failed++;
-        errors.push(jid + ': ' + e.message);
-      }
+      try { await sess.sock.sendMessage(jid, { text: message }); sent++; } catch (e) { failed++; errors.push(jid + ': ' + e.message); }
       await new Promise((r) => setTimeout(r, 800));
     }
     res.json({ success: true, sent, failed, total: groupIds.length, errors });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/api/logout', async (req, res) => {
   try {
     const { session, password } = req.body;
     const sessName = session || 'default';
-    if (!verifyAuth(sessName, password)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only owner can logout.' });
-    }
-
+    if (!verifyAuth(sessName, password)) return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only owner can logout.' });
     const sess = sessions[sessName];
-    if (sess) {
-      await sess.logout();
-      delete sessions[sessName];
-      delete sessionPasswords[sessName];
-    }
+    if (sess) { await sess.logout(); delete sessions[sessName]; delete sessionPasswords[sessName]; }
     res.json({ success: true });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
   try {
     const { session, password, hater, delay, lastHater, groupIds } = req.body;
-    if (!verifyAuth(session, password)) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only session owner can start tasks.' });
-    }
-
+    if (!verifyAuth(session, password)) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} } return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only session owner can start tasks.' }); }
     const sess = getOrCreateSession(session);
-
-    if (!sess.isPaired || !sess.sock) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'WhatsApp not paired yet.' });
-    }
-    if (sess.bulkState.running) {
-      if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running on this session.' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
-    }
-
+    if (!sess.isPaired || !sess.sock) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} } return res.status(400).json({ success: false, error: 'WhatsApp not paired yet.' }); }
+    if (sess.bulkState.running) { if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} } return res.status(400).json({ success: false, error: 'A task is already running on this session.' }); }
+    if (!req.file) return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
     let messages = [];
     try {
-      const content = fs.readFileSync(req.file.path, 'utf8');
-      const seen = new Set();
-      content.split(/\r?\n/).forEach((line) => {
-        const t = line.trim();
-        if (t && !seen.has(t)) {
-          seen.add(t);
-          messages.push(t);
-        }
-      });
-    } finally {
-      try { fs.unlinkSync(req.file.path); } catch (_) {}
-    }
-
-    if (!messages.length) {
-      return res.status(400).json({ success: false, error: 'No valid messages found' });
-    }
-
-    const targets = [];
-    const seen = new Set();
-    let parsedGroups = [];
+      const content = fs.readFileSync(req.file.path, 'utf8'); const seen = new Set();
+      content.split(/\r?\n/).forEach((line) => { const t = line.trim(); if (t && !seen.has(t)) { seen.add(t); messages.push(t); } });
+    } finally { try { fs.unlinkSync(req.file.path); } catch (_) {} }
+    if (!messages.length) return res.status(400).json({ success: false, error: 'No valid messages found' });
+    const targets = []; const seen = new Set(); let parsedGroups = [];
     try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
-    parsedGroups.forEach((jid) => {
-      if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
-    });
-
-    if (!targets.length) {
-      return res.status(400).json({ success: false, error: 'No targets selected' });
-    }
-
-    let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS;
-    if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
-    const waitMs = delaySec * 1000;
-
-    const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : '';
-    const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() + ' ' : '';
+    parsedGroups.forEach((jid) => { if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); } });
+    if (!targets.length) return res.status(400).json({ success: false, error: 'No targets selected' });
+    let delaySec = parseInt(delay) || DEFAULT_DELAY_SECONDS; if (delaySec < MIN_DELAY_SECONDS) delaySec = MIN_DELAY_SECONDS;
+    const waitMs = delaySec * 1000; const prefix = hater && hater.trim() ? hater.trim() + '\n\n' : ''; const suffix = lastHater && lastHater.trim() ? '\n\n' + lastHater.trim() + ' ' : '';
     const preparedMessages = messages.map((m) => prefix + m + suffix);
-
-    sess.bulkState.running = true;
-    sess.bulkState.stopFlag = false;
-    sess.bulkState.sent = 0;
-    sess.bulkState.failed = 0;
-    sess.bulkState.tasks += 1;
-    sess.bulkState.total = messages.length;
-    sess.bulkState.remaining = messages.length;
-    sess.bulkState.cycle = 0;
-    sess.bulkState.msgIndex = 0;
-    sess.bulkState.targetIndex = 0;
-    sess.bulkState.totalTargets = targets.length;
-    sess.bulkState.currentMessage = preparedMessages[0] || '';
-    sess.bulkState.currentTarget = targets[0] ? targets[0].label : '';
-    sess.bulkState.targets = targets;
-    sess.bulkState.messages = preparedMessages;
-    sess.bulkState.delayMs = waitMs;
-    sess.bulkState.startedAt = Date.now();
-    sess.bulkState.workerAlive = false;
-    sess.bulkState.lastBeat = Date.now();
-
+    sess.bulkState.running = true; sess.bulkState.stopFlag = false; sess.bulkState.sent = 0; sess.bulkState.failed = 0; sess.bulkState.tasks += 1; sess.bulkState.total = messages.length; sess.bulkState.remaining = messages.length; sess.bulkState.cycle = 0; sess.bulkState.msgIndex = 0; sess.bulkState.targetIndex = 0; sess.bulkState.totalTargets = targets.length; sess.bulkState.currentMessage = preparedMessages[0] || ''; sess.bulkState.currentTarget = targets[0] ? targets[0].label : ''; sess.bulkState.targets = targets; sess.bulkState.messages = preparedMessages; sess.bulkState.delayMs = waitMs; sess.bulkState.startedAt = Date.now(); sess.bulkState.workerAlive = false; sess.bulkState.lastBeat = Date.now();
     sess.pushLog('info', `24/7 Infinite Cyber Loop launched — ${messages.length} messages × ${targets.length} targets`);
-
     sess.runWorker();
-
     res.json({ success: true, total: messages.length, totalTargets: targets.length });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  } catch (err) { res.status(500).json({ success: false, error: err.message }); }
 });
 
 app.post('/api/bulk/stop', (req, res) => {
   const { session, password } = req.body;
-  if (!verifyAuth(session, password)) {
-    return res.status(401).json({ success: false, error: 'Unauthorized! Only the session owner with the correct password can stop this task.' });
-  }
-
+  if (!verifyAuth(session, password)) return res.status(401).json({ success: false, error: 'Unauthorized! Only the session owner with the correct password can stop this task.' });
   const sess = getOrCreateSession(session);
-  if (!sess.bulkState.running) {
-    return res.status(400).json({ success: false, error: 'No active task running on this session.' });
-  }
-  sess.bulkState.stopFlag = true;
-  sess.bulkState.running = false;
-  sess.pushLog('warn', 'Emergency stop executed securely by session owner');
+  if (!sess.bulkState.running) return res.status(400).json({ success: false, error: 'No active task running on this session.' });
+  sess.bulkState.stopFlag = true; sess.bulkState.running = false; sess.pushLog('warn', 'Emergency stop executed securely by session owner');
   res.json({ success: true });
 });
 
 app.get('/api/bulk/status', (req, res) => {
   const sessName = req.query.session || 'default';
   const sess = getOrCreateSession(sessName);
-  res.json({
-    running: sess.bulkState.running,
-    workerAlive: sess.bulkState.workerAlive,
-    paired: sess.isPaired,
-    sent: sess.bulkState.sent,
-    failed: sess.bulkState.failed,
-    tasks: sess.bulkState.tasks,
-    total: sess.bulkState.total,
-    remaining: sess.bulkState.remaining,
-    cycle: sess.bulkState.cycle,
-    msgIndex: sess.bulkState.msgIndex,
-    targetIndex: sess.bulkState.targetIndex,
-    totalTargets: sess.bulkState.totalTargets,
-    currentMessage: sess.bulkState.currentMessage,
-    currentTarget: sess.bulkState.currentTarget,
-    uptimeFormatted: formatUptime(Date.now() - serverStartTime),
-    logs: sess.bulkState.logs.slice(-200),
-  });
+  res.json({ running: sess.bulkState.running, workerAlive: sess.bulkState.workerAlive, paired: sess.isPaired, sent: sess.bulkState.sent, failed: sess.bulkState.failed, tasks: sess.bulkState.tasks, total: sess.bulkState.total, remaining: sess.bulkState.remaining, cycle: sess.bulkState.cycle, msgIndex: sess.bulkState.msgIndex, targetIndex: sess.bulkState.targetIndex, totalTargets: sess.bulkState.totalTargets, currentMessage: sess.bulkState.currentMessage, currentTarget: sess.bulkState.currentTarget, uptimeFormatted: formatUptime(Date.now() - serverStartTime), logs: sess.bulkState.logs.slice(-200) });
 });
 
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
@@ -1364,7 +1188,6 @@ app.get('/health', (req, res) => res.json({ status: 'ok' }));
 app.listen(PORT, HOST, () => {
   console.log('\n🚀 RK RAJA XWD Elite Pro Cyber Server Live: http://' + HOST + ':' + PORT + '/\n');
 });
-
 process.exit = process.exit || (() => {});
 process.on('SIGTERM', () => process.exit(0));
 process.on('SIGINT', () => process.exit(0));
