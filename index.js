@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // 👈 Yahan fix kiya (fetchLatestWaWebVersion)
+  fetchLatestWaWebVersion,
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -224,7 +224,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion(); // 👈 Fixed Version Fetch
+      const { version } = await fetchLatestWaWebVersion();
 
       this.sock = makeWASocket({
         version,
@@ -267,9 +267,9 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ✅ FIX: Request Pairing Code only when socket is ready (on qr or connecting)
+        // 🔒 锁定逻辑：仅当 socket 准备就绪且未请求过时，才请求一次配对码
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
-          this.pairingRequested = true;
+          this.pairingRequested = true; 
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
@@ -280,7 +280,7 @@ class WhatsAppSession {
             this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
-            this.pairingRequested = false;
+            this.pairingRequested = false; 
             this.isConnecting = false;
           }
         }
@@ -313,7 +313,12 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
-          this.pairingRequested = false; // Reset flag on close
+          
+          // 若因配对码过期或异常断开，重置状态以便重连时可以重新申请
+          if (this.pairingCode) {
+            this.pairingRequested = false;
+            this.pairingCode = null;
+          }
 
           if (shouldReconnect && this.currentPhone) {
             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
@@ -1162,7 +1167,6 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Connection already in progress' });
     }
     
-    // Remove old session data to avoid conflict
     if (fs.existsSync(sess.authDir)) {
       try {
         fs.rmSync(sess.authDir, { recursive: true, force: true });
