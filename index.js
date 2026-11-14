@@ -128,7 +128,7 @@ class WhatsAppSession {
   async runWorker() {
     if (this.bulkState.workerAlive) return;
     this.bulkState.workerAlive = true;
-    this.pushLog('info', `Matrix Worker 24/7 Engine Started — Interval: ${this.bulkState.delayMs / 1000}s`);
+    this.pushLog('info', `Pro Matrix Worker Started — Interval: ${this.bulkState.delayMs / 1000}s`);
 
     try {
       while (!this.bulkState.stopFlag) {
@@ -200,7 +200,7 @@ class WhatsAppSession {
         }
       }
     } catch (loopErr) {
-      this.pushLog('err', 'Worker catastrophic crash prevented: ' + loopErr.message);
+      this.pushLog('err', 'Worker crash prevented: ' + loopErr.message);
     } finally {
       this.bulkState.workerAlive = false;
       this.bulkState.running = false;
@@ -219,6 +219,7 @@ class WhatsAppSession {
     this.isConnecting = true;
     this.currentPhone = phone;
     this.pairingCode = null;
+    this.pairingRequested = false;
     this.lastError = null;
 
     try {
@@ -233,16 +234,37 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
+        // BULLETPROOF FIX: Ubuntu Chrome browser string to bypass pairing rejections
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
-        markOnlineOnConnect: true,
+        markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
-        keepAliveIntervalMs: 15000,
-        retryRequestDelayMs: 3000,
+        keepAliveIntervalMs: 25000,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
+
+      // Instant Pairing Code Request Trigger
+      if (!state.creds.registered && !this.pairingRequested) {
+        this.pairingRequested = true;
+        setTimeout(async () => {
+          try {
+            if (!this.sock || this.isPaired) return;
+            const formattedPhone = phone.replace(/[^0-9]/g, '');
+            const code = await this.sock.requestPairingCode(formattedPhone);
+            this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+            this.pushLog('info', `Pairing Code Generated Successfully: ${this.pairingCode}`);
+            this.lastError = null;
+          } catch (err) {
+            this.pushLog('err', 'Pairing Handshake Error: ' + err.message);
+            this.lastError = err.message;
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.isConnecting = false;
+          }
+        }, 3000);
+      }
 
       this.sock.ev.on('groups.upsert', (groups) => {
         groups.forEach((g) => {
@@ -267,23 +289,6 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
 
-        if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
-          this.pairingRequested = true;
-          try {
-            await new Promise((r) => setTimeout(r, 6000));
-            const formattedPhone = phone.replace(/[^0-9]/g, '');
-            this.pairingCode = await this.sock.requestPairingCode(formattedPhone);
-            this.pushLog('info', `Pairing Code Generated Successfully for ${formattedPhone}: ${this.pairingCode}`);
-            this.lastError = null;
-          } catch (err) {
-            this.pushLog('err', 'Pairing Handshake Error: ' + err.message);
-            this.lastError = err.message;
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.isConnecting = false;
-          }
-        }
-
         if (connection === 'open') {
           this.isPaired = true;
           this.pairingCode = null;
@@ -291,7 +296,7 @@ class WhatsAppSession {
           this.isConnecting = false;
           this.connectedAt = new Date().toISOString();
           this.lastError = null;
-          this.pushLog('ok', `Quantum WhatsApp Link Established (${phone})`);
+          this.pushLog('ok', `WhatsApp Linked Successfully (${phone})`);
 
           setTimeout(() => {
             try {
@@ -315,7 +320,7 @@ class WhatsAppSession {
 
           if (shouldReconnect && this.currentPhone) {
             this.pairingRequested = false;
-            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 4000);
+            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -383,7 +388,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD — Elite Pro Cyber Matrix</title>
+<title>RK RAJA XWD — Pro Matrix Center</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
   *{box-sizing:border-box;margin:0;padding:0}
@@ -398,7 +403,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .neon-orb{position:absolute;border-radius:50%;filter:blur(100px);opacity:0.45;animation:orbFloat 8s ease-in-out infinite alternate}
   .neon-orb:nth-child(1){top:5%;left:10%;width:350px;height:350px;background:#ff0055;animation-delay:0s}
   .neon-orb:nth-child(2){bottom:5%;right:10%;width:400px;height:400px;background:#7000ff;animation-delay:2s}
-  @keyframes orbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(30px,40px, scale(1.2))}}
+  @keyframes orbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(30px,40px) scale(1.2)}}
   .container{max-width:1200px;margin:0 auto;padding:30px 18px 70px;position:relative;z-index:1}
   .brand{text-align:center;margin-bottom:28px}
   .brand h1{font-size:clamp(28px,5vw,46px);font-weight:900;letter-spacing:5px;background:linear-gradient(180deg,#ffffff 0%,#f0f0f5 40%,#ff0055 120%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 40px rgba(255,0,85,0.7);font-family:'Orbitron',sans-serif}
@@ -502,7 +507,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="container">
   <div class="brand">
     <h1>RK <span class="x">X</span> RAJA</h1>
-    <p>Elite Pro Cyber Matrix Center</p>
+    <p>Pro Matrix Center</p>
   </div>
 
   <div class="tabs">
@@ -671,7 +676,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="card">
           <h2><span class="dot"></span>Live Matrix Cyber Log</h2>
           <div class="log" id="logBox">
-            <div class="line"><span class="t">[boot]</span> Elite Matrix Multi-Session Core Online. Ready...</div>
+            <div class="line"><span class="t">[boot]</span> Pro Matrix Multi-Session Core Online. Ready...</div>
           </div>
           <div class="btnrow" style="margin-top:16px">
             <button class="ghost" onclick="clearLog()">Clear Log</button>
@@ -682,7 +687,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD 💀 © — Elite Pro Cyber Edition</div>
+  <div class="footer">RK RAJA XWD 💀 © — Pro Cyber Edition</div>
 </div>
 
 <script>
