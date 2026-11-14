@@ -2,8 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // ✅ Latest WA Web version fix
-  Browsers,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
@@ -26,7 +25,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000;
+const PAIRING_LOCK_MS = 60000; // कोड 60 सेकंड तक लॉक रहेगा
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -173,7 +172,7 @@ class WhatsAppSession {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: ['Ubuntu', 'Chrome', ''], // ✅ Canonical label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
