@@ -3,6 +3,7 @@ const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestWaWebVersion,
+  Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
@@ -25,7 +26,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000; // कोड 60 सेकंड तक लॉक रहेगा
+const PAIRING_LOCK_MS = 60000;
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -165,14 +166,14 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion(); // ✅ Latest version fix
+      const { version } = await fetchLatestWaWebVersion();
 
       this.sock = makeWASocket({
         version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', ''], // ✅ Canonical label fix
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -189,7 +190,6 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ✅ FIX: Request pairing code ONLY when socket is ready and not already requested
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           this.pairingCodeGeneratedAt = Date.now();
@@ -229,13 +229,11 @@ class WhatsAppSession {
           this.isPaired = false; 
           this.isConnecting = false;
 
-          // If it's restartRequired (515), just reconnect without wiping the code
           if (statusCode === DisconnectReason.restartRequired) {
              setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
              return;
           }
 
-          // Preserve code for 60 seconds on network drop
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > PAIRING_LOCK_MS);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null; 
