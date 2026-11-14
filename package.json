@@ -6,7 +6,7 @@
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^7.0.0-rc.9",
+    "@ms-nicky/baileys": "^2.0.3",
     "@hapi/boom": "^10.0.1",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
