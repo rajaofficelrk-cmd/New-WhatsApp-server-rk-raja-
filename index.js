@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion,
+  fetchLatestWaWebVersion, // ✅ Latest version fetch (stale version fix)
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -44,7 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
-    this.pairingCodeGeneratedAt = 0; // 🕒 Pairing lock timer
+    this.pairingCodeGeneratedAt = 0; // Pairing lock timer
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -229,7 +229,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion();
+      const { version } = await fetchLatestWaWebVersion(); // ✅ FIX: Latest version
 
       this.sock = makeWASocket({
         version,
@@ -239,7 +239,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.ubuntu('Chrome'), // ✅ FIX: Canonical label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -272,13 +272,14 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // ✅ FIX: Pairing code only requested when socket is ready
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pairingCodeGeneratedAt = Date.now();
+            this.pairingCodeGeneratedAt = Date.now(); // Lock starts
             this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
@@ -319,6 +320,7 @@ class WhatsAppSession {
           this.isPaired = false;
           this.isConnecting = false;
 
+          // ✅ FIX: Code 60 sec tak preserve rahega
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
