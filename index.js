@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
+  fetchLatestWaWebVersion, // 👈 Yahan fix kiya (fetchLatestWaWebVersion)
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -224,7 +224,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestBaileysVersion();
+      const { version } = await fetchLatestWaWebVersion(); // 👈 Fixed Version Fetch
 
       this.sock = makeWASocket({
         version,
@@ -234,7 +234,6 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        // FIX: Ubuntu Chrome browser signature avoids "Couldn't link device" rejection[span_0](start_span)[span_0](end_span)
         browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
@@ -244,27 +243,6 @@ class WhatsAppSession {
       });
 
       this.sock.ev.on('creds.update', saveCreds);
-
-      // Instant stable pairing trigger
-      if (!state.creds.registered && !this.pairingRequested) {
-        this.pairingRequested = true;
-        setTimeout(async () => {
-          try {
-            if (!this.sock || this.isPaired) return;
-            const formattedPhone = phone.replace(/[^0-9]/g, '');
-            const code = await this.sock.requestPairingCode(formattedPhone);
-            this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
-            this.lastError = null;
-          } catch (err) {
-            this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
-            this.lastError = err.message;
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.isConnecting = false;
-          }
-        }, 3000);
-      }
 
       this.sock.ev.on('groups.upsert', (groups) => {
         groups.forEach((g) => {
@@ -287,7 +265,25 @@ class WhatsAppSession {
       });
 
       this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
+
+        // ✅ FIX: Request Pairing Code only when socket is ready (on qr or connecting)
+        if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
+          this.pairingRequested = true;
+          try {
+            const formattedPhone = phone.replace(/[^0-9]/g, '');
+            const code = await this.sock.requestPairingCode(formattedPhone);
+            this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+            this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
+            this.lastError = null;
+          } catch (err) {
+            this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
+            this.lastError = err.message;
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.isConnecting = false;
+          }
+        }
 
         if (connection === 'open') {
           this.isPaired = true;
@@ -317,9 +313,9 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
+          this.pairingRequested = false; // Reset flag on close
 
           if (shouldReconnect && this.currentPhone) {
-            this.pairingRequested = false;
             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
@@ -1166,6 +1162,7 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Connection already in progress' });
     }
     
+    // Remove old session data to avoid conflict
     if (fs.existsSync(sess.authDir)) {
       try {
         fs.rmSync(sess.authDir, { recursive: true, force: true });
