@@ -2,7 +2,8 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion,
+  fetchLatestBaileysVersion,
+  Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
@@ -25,7 +26,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000; // कोड 60 सेकंड तक लॉक रहेगा
+const PAIRING_LOCK_MS = 60000;
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -165,14 +166,15 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion();
+      const { version } = await fetchLatestBaileysVersion();
 
       this.sock = makeWASocket({
         version,
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', ''], // ✅ Canonical label
+        // FIX: macOS Desktop browser signature prevents "Couldn't link device" error rejection on WhatsApp servers
+        browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -189,23 +191,26 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
+        if (!state.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           this.pairingCodeGeneratedAt = Date.now();
           
-          try {
-            const formattedPhone = phone.replace(/[^0-9]/g, '');
-            const code = await this.sock.requestPairingCode(formattedPhone);
-            this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pushLog('info', `Pairing Code: ${this.pairingCode}`);
-            this.lastError = null;
-          } catch (err) {
-            this.pushLog('err', 'Pairing Failed: ' + err.message);
-            this.lastError = err.message;
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.isConnecting = false;
-          }
+          setTimeout(async () => {
+            try {
+              if (!this.sock || this.isPaired) return;
+              const formattedPhone = phone.replace(/[^0-9]/g, '');
+              const code = await this.sock.requestPairingCode(formattedPhone);
+              this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+              this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
+              this.lastError = null;
+            } catch (err) {
+              this.pushLog('err', 'Pairing Failed: ' + err.message);
+              this.lastError = err.message;
+              this.pairingCode = null;
+              this.pairingRequested = false;
+              this.isConnecting = false;
+            }
+          }, 3000);
         }
 
         if (connection === 'open') {
@@ -1273,6 +1278,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const seen = new Set();
     let parsedGroups = [];
     try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
+    parsedGroups.keys().forEach(() => {});
     parsedGroups.forEach((jid) => {
       if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
     });
@@ -1290,6 +1296,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
     sess.bulkState.running = true;
+    sess.bulkState.stopGrade = false;
     sess.bulkState.stopFlag = false;
     sess.bulkState.sent = 0;
     sess.bulkState.failed = 0;
