@@ -80,7 +80,7 @@ class WhatsAppSession {
   pushLog(type, msg) {
     this.bulkState.logs.push({ id: ++this.bulkState.logId, ts: Date.now(), type, msg });
     if (this.bulkState.logs.length > 500) this.bulkState.logs.splice(0, this.bulkState.logs.length - 500);
-    const icons = { ok: '✅', err: '❌', warn: '⚠️', info: 'ℹ️' };
+    const icons = { ok: '⚡', err: '💀', warn: '🔥', info: '💎' };
     console.log(`[${this.name}] ${icons[type] || '•'} ${msg}`);
   }
 
@@ -128,7 +128,7 @@ class WhatsAppSession {
   async runWorker() {
     if (this.bulkState.workerAlive) return;
     this.bulkState.workerAlive = true;
-    this.pushLog('info', `Background Precise Worker started — Exact ${this.bulkState.delayMs / 1000}s interval active`);
+    this.pushLog('info', `Matrix Worker 24/7 Engine Started — Interval: ${this.bulkState.delayMs / 1000}s`);
 
     try {
       while (!this.bulkState.stopFlag) {
@@ -156,7 +156,7 @@ class WhatsAppSession {
             this.bulkState.lastBeat = Date.now();
 
             if (!this.isSocketReady()) {
-              this.pushLog('warn', 'Socket drop detected — waiting for reconnection...');
+              this.pushLog('warn', 'Socket link lost — waiting for automatic healing...');
               while (!this.isSocketReady() && !this.bulkState.stopFlag) {
                 await new Promise((r) => setTimeout(r, 2000));
               }
@@ -170,14 +170,14 @@ class WhatsAppSession {
               const res = await this.safeSend(t.jid, msg);
               if (res.ok) {
                 this.bulkState.sent++;
-                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → ${t.label}`);
+                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → Target: ${t.label}`);
               } else {
                 this.bulkState.failed++;
-                this.pushLog('err', `Msg ${mi + 1} → ${t.label}: ${res.error}`);
+                this.pushLog('err', `Msg ${mi + 1} → Target: ${t.label} Failed: ${res.error}`);
               }
             } catch (e) {
               this.bulkState.failed++;
-              this.pushLog('err', `Send error → ${t.label}: ${e.message}`);
+              this.pushLog('err', `Execution Exception → Target: ${t.label}: ${e.message}`);
             }
 
             this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
@@ -196,25 +196,25 @@ class WhatsAppSession {
           this.bulkState.remaining = this.bulkState.messages.length;
           this.bulkState.msgIndex = 0;
           this.bulkState.targetIndex = 0;
-          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed — looping seamlessly.`);
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} completed successfully. Looping infinitely...`);
         }
       }
     } catch (loopErr) {
-      this.pushLog('err', 'Worker exception: ' + loopErr.message);
+      this.pushLog('err', 'Worker catastrophic crash prevented: ' + loopErr.message);
     } finally {
       this.bulkState.workerAlive = false;
       this.bulkState.running = false;
       this.bulkState.stopFlag = false;
       this.bulkState.currentMessage = '';
       this.bulkState.currentTarget = '';
-      this.pushLog('warn', `Task fully stopped. Sent: ${this.bulkState.sent}, Failed: ${this.bulkState.failed}`);
+      this.pushLog('warn', `Worker session terminated safely. Total Sent: ${this.bulkState.sent}`);
     }
   }
 
   async connect(phone) {
-    if (!phone) throw new Error('Phone number required');
-    if (this.isConnecting) throw new Error('Connection already in progress');
-    if (this.isPaired) throw new Error('Already paired');
+    if (!phone) throw new Error('Phone number is required');
+    if (this.isConnecting) throw new Error('Connection handshake already active');
+    if (this.isPaired) throw new Error('Session is already active & paired');
 
     this.isConnecting = true;
     this.currentPhone = phone;
@@ -239,7 +239,7 @@ class WhatsAppSession {
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 15000,
-        retryRequestDelayMs: 2500,
+        retryRequestDelayMs: 3000,
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -270,14 +270,13 @@ class WhatsAppSession {
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            // Stable delay for stable socket initialization before pairing request
-            await new Promise((r) => setTimeout(r, 5000));
+            await new Promise((r) => setTimeout(r, 6000));
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             this.pairingCode = await this.sock.requestPairingCode(formattedPhone);
-            this.pushLog('info', `Pairing code successfully generated for ${formattedPhone}: ${this.pairingCode}`);
+            this.pushLog('info', `Pairing Code Generated Successfully for ${formattedPhone}: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
-            this.pushLog('err', 'Pairing code generation error: ' + err.message);
+            this.pushLog('err', 'Pairing Handshake Error: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -292,7 +291,7 @@ class WhatsAppSession {
           this.isConnecting = false;
           this.connectedAt = new Date().toISOString();
           this.lastError = null;
-          this.pushLog('ok', `WhatsApp connected successfully (${phone})`);
+          this.pushLog('ok', `Quantum WhatsApp Link Established (${phone})`);
 
           setTimeout(() => {
             try {
@@ -309,7 +308,7 @@ class WhatsAppSession {
         if (connection === 'close') {
           const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-          this.pushLog('warn', `Connection closed (code ${statusCode})`);
+          this.pushLog('warn', `Connection stream closed with code ${statusCode}`);
 
           this.isPaired = false;
           this.isConnecting = false;
@@ -346,14 +345,14 @@ class WhatsAppSession {
     this.lastError = null;
     this.sock = null;
     this.groupsCache = {};
-    this.pushLog('warn', 'Logged out, session auth cleared');
+    this.pushLog('warn', 'Session wiped and logged out completely');
   }
 }
 
 setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
-      sess.pushLog('warn', 'Watchdog triggered: reviving worker...');
+      sess.pushLog('warn', 'Watchdog Recovery: reviving background matrix thread...');
       sess.bulkState.workerAlive = false;
       sess.runWorker();
     }
@@ -384,233 +383,126 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <head>
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1.0"/>
-<title>RK RAJA XWD — Secure Multi-Session Control Center</title>
+<title>RK RAJA XWD — Elite Pro Cyber Matrix</title>
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;900&family=Rajdhani:wght@500;600;700&display=swap');
-  
   *{box-sizing:border-box;margin:0;padding:0}
   html,body{height:100%}
-  body{
-    font-family:'Rajdhani',sans-serif;
-    background:#030305;color:#e2e8f0;min-height:100vh;overflow-x:hidden;position:relative;
-  }
-
-  .live-bg{
-    position:fixed;inset:0;z-index:-3;pointer-events:none;background:#030305;
-    overflow:hidden;
-  }
-  .live-bg::before{
-    content:"";position:absolute;top:-50%;left:-50%;width:200%;height:200%;
-    background:radial-gradient(circle at 50% 50%, rgba(255,0,60,0.12) 0%, rgba(13,2,33,0.8) 45%, transparent 70%);
-    animation:rotateGlow 15s linear infinite;
-  }
-  @keyframes rotateGlow{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
-
-  .cyber-grid{
-    position:fixed;inset:0;z-index:-2;pointer-events:none;
-    background-image:linear-gradient(rgba(255,0,60,0.04) 1px, transparent 1px),
-                     linear-gradient(90deg, rgba(255,0,60,0.04) 1px, transparent 1px);
-    background-size:40px 40px;
-    animation:gridMove 20s linear infinite;
-  }
-  @keyframes gridMove{0%{background-position:0 0}100%{background-position:40px 40px}}
-
-  .floating-orbs{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
-  .orb{
-    position:absolute;border-radius:50%;filter:blur(80px);opacity:0.35;
-    animation:orbFloat 10s ease-in-out infinite alternate;
-  }
-  .orb:nth-child(1){top:10%;left:15%;width:300px;height:300px;background:#ff003c;animation-delay:0s}
-  .orb:nth-child(2){bottom:10%;right:15%;width:350px;height:350px;background:#7928ca;animation-delay:3s}
-  @keyframes orbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(40px,50px) scale(1.15)}}
-
-  .container{max-width:1180px;margin:0 auto;padding:28px 18px 60px;position:relative;z-index:1}
-
-  .brand{text-align:center;margin-bottom:26px}
-  .brand h1{
-    font-size:clamp(24px,4.5vw,42px);font-weight:900;letter-spacing:4px;
-    background:linear-gradient(180deg,#ffffff 0%,#e0e0f0 40%,#ff003c 120%);
-    -webkit-background-clip:text;background-clip:text;color:transparent;
-    text-shadow:0 0 30px rgba(255,0,60,0.5);
-    font-family:'Orbitron',sans-serif;
-  }
-  .brand h1 .x{color:#ff003c;-webkit-text-fill-color:#ff003c;text-shadow:0 0 20px #ff003c}
-  .brand p{color:#a0a0b5;font-size:12px;letter-spacing:4px;margin-top:6px;text-transform:uppercase;font-weight:600}
-
-  .tabs{display:flex;gap:12px;margin-bottom:24px;flex-wrap:wrap;justify-content:center}
-  .tab{
-    padding:12px 24px;border-radius:12px;font-size:13px;font-weight:700;letter-spacing:2px;
-    text-transform:uppercase;cursor:pointer;border:1px solid rgba(255,0,60,0.4);
-    background:rgba(255,0,60,0.06);color:#ff5277;transition:all 0.3s ease;
-    font-family:'Orbitron',sans-serif;backdrop-filter:blur(10px);
-  }
-  .tab.active{
-    background:linear-gradient(135deg,#ff0a45,#b3002d);color:#fff;border-color:#ff003c;
-    box-shadow:0 0 25px rgba(255,0,60,0.6), inset 0 1px 0 rgba(255,255,255,0.3);
-  }
-  .tab:hover:not(.active){background:rgba(255,0,60,0.15);color:#fff;box-shadow:0 0 15px rgba(255,0,60,0.3)}
-
+  body{font-family:'Rajdhani',sans-serif;background:#020205;color:#e2e8f0;min-height:100vh;overflow-x:hidden;position:relative}
+  .matrix-bg{position:fixed;inset:0;z-index:-3;pointer-events:none;background:#020205;overflow:hidden}
+  .matrix-bg::before{content:"";position:absolute;top:-50%;left:-50%;width:200%;height:200%;background:radial-gradient(circle at 50% 50%, rgba(255,0,85,0.15) 0%, rgba(5,2,20,0.9) 50%, transparent 75%);animation:matrixGlow 12s linear infinite}
+  @keyframes matrixGlow{0%{transform:rotate(0deg)}100%{transform:rotate(360deg)}}
+  .cyber-grid{position:fixed;inset:0;z-index:-2;pointer-events:none;background-image:linear-gradient(rgba(255,0,85,0.06) 1px, transparent 1px), linear-gradient(90deg, rgba(255,0,85,0.06) 1px, transparent 1px);background-size:35px 35px;animation:gridMove 25s linear infinite}
+  @keyframes gridMove{0%{background-position:0 0}100%{background-position:35px 35px}}
+  .orb-container{position:fixed;inset:0;z-index:-1;pointer-events:none;overflow:hidden}
+  .neon-orb{position:absolute;border-radius:50%;filter:blur(100px);opacity:0.45;animation:orbFloat 8s ease-in-out infinite alternate}
+  .neon-orb:nth-child(1){top:5%;left:10%;width:350px;height:350px;background:#ff0055;animation-delay:0s}
+  .neon-orb:nth-child(2){bottom:5%;right:10%;width:400px;height:400px;background:#7000ff;animation-delay:2s}
+  @keyframes orbFloat{0%{transform:translate(0,0) scale(1)}100%{transform:translate(30px,40px, scale(1.2))}}
+  .container{max-width:1200px;margin:0 auto;padding:30px 18px 70px;position:relative;z-index:1}
+  .brand{text-align:center;margin-bottom:28px}
+  .brand h1{font-size:clamp(28px,5vw,46px);font-weight:900;letter-spacing:5px;background:linear-gradient(180deg,#ffffff 0%,#f0f0f5 40%,#ff0055 120%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 40px rgba(255,0,85,0.7);font-family:'Orbitron',sans-serif}
+  .brand h1 .x{color:#ff0055;-webkit-text-fill-color:#ff0055;text-shadow:0 0 25px #ff0055}
+  .brand p{color:#94a3b8;font-size:12px;letter-spacing:5px;margin-top:6px;text-transform:uppercase;font-weight:700}
+  .tabs{display:flex;gap:14px;margin-bottom:26px;flex-wrap:wrap;justify-content:center}
+  .tab{padding:13px 28px;border-radius:14px;font-size:13px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;border:1px solid rgba(255,0,85,0.45);background:rgba(255,0,85,0.06);color:#ff5288;transition:all 0.3s ease;font-family:'Orbitron',sans-serif;backdrop-filter:blur(12px)}
+  .tab.active{background:linear-gradient(135deg,#ff0055,#990033);color:#fff;border-color:#ff0055;box-shadow:0 0 30px rgba(255,0,85,0.7), inset 0 1px 0 rgba(255,255,255,0.4)}
+  .tab:hover:not(.active){background:rgba(255,0,85,0.18);color:#fff;box-shadow:0 0 20px rgba(255,0,85,0.4)}
   .panel{display:none}
   .panel.active{display:block;animation:fadeIn 0.4s cubic-bezier(0.16,1,0.3,1)}
-  @keyframes fadeIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
-
-  .layout{display:grid;grid-template-columns:400px 1fr;gap:20px}
-  @media(max-width:900px){.layout{grid-template-columns:1fr}}
-
-  .card{
-    position:relative;
-    background:linear-gradient(145deg, rgba(18,18,26,0.8), rgba(8,8,14,0.85));
-    border:1px solid rgba(255,0,60,0.3);
-    border-radius:20px;padding:24px;margin-bottom:20px;
-    backdrop-filter:blur(20px);box-shadow:0 20px 50px rgba(0,0,0,0.7), 0 0 30px rgba(255,0,60,0.08);
-  }
-  .card::after{
-    content:"";position:absolute;inset:0;border-radius:20px;pointer-events:none;
-    border:1px solid rgba(255,255,255,0.05);
-  }
-  .card h2{
-    font-size:14px;margin-bottom:18px;color:#fff;letter-spacing:2px;
-    display:flex;align-items:center;gap:10px;text-transform:uppercase;
-    font-family:'Orbitron',sans-serif;
-  }
-  .card h2 .dot{width:9px;height:9px;border-radius:50%;background:#ff003c;box-shadow:0 0 15px #ff003c, 0 0 5px #fff}
-
-  label{display:block;font-size:11px;color:#a0a0b5;margin-bottom:8px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700}
-  input,textarea,select{
-    width:100%;background:rgba(3,3,6,0.85);border:1px solid rgba(255,0,60,0.3);
-    border-radius:12px;padding:12px 16px;color:#f1f1f6;font-size:14px;
-    font-family:inherit;outline:none;transition:all 0.3s ease;
-  }
-  input:focus,textarea:focus,select:focus{
-    border-color:#ff003c;box-shadow:0 0 0 3px rgba(255,0,60,0.2), 0 0 25px rgba(255,0,60,0.3);
-  }
-  input:disabled{color:#5c5c6d;cursor:not-allowed}
-  textarea{resize:vertical;min-height:96px}
-  .field{margin-bottom:16px}
-
-  button{
-    background:linear-gradient(135deg,#ff0a45,#b3002d);color:#fff;border:none;
-    border-radius:12px;padding:14px 24px;font-size:12px;font-weight:700;
-    letter-spacing:2px;text-transform:uppercase;cursor:pointer;
-    transition:all 0.3s ease;margin-top:6px;width:100%;
-    box-shadow:0 8px 25px rgba(255,0,60,0.35), inset 0 1px 0 rgba(255,255,255,0.3);
-    font-family:'Orbitron',sans-serif;
-  }
-  button:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 12px 35px rgba(255,0,60,0.55), 0 0 20px rgba(255,0,60,0.4)}
-  button:disabled{background:#1c1c24;color:#555566;cursor:not-allowed;box-shadow:none}
-  button.ghost{background:transparent;border:1px solid rgba(255,0,60,0.5);color:#ff5277;box-shadow:none}
-  button.ghost:hover:not(:disabled){background:rgba(255,0,60,0.12);color:#fff}
-  button.danger{background:linear-gradient(135deg,#ff0040,#800020);border:1px solid #ff003c;box-shadow:0 8px 25px rgba(255,0,60,0.4)}
-  .btnrow{display:flex;gap:12px}
+  @keyframes fadeIn{from{opacity:0;transform:translateY(15px)}to{opacity:1;transform:translateY(0)}}
+  .layout{display:grid;grid-template-columns:420px 1fr;gap:22px}
+  @media(max-width:920px){.layout{grid-template-columns:1fr}}
+  .card{position:relative;background:linear-gradient(145deg, rgba(16,16,24,0.9), rgba(8,8,14,0.95));border:1px solid rgba(255,0,85,0.35);border-radius:22px;padding:26px;margin-bottom:22px;backdrop-filter:blur(25px);box-shadow:0 25px 60px rgba(0,0,0,0.8), 0 0 35px rgba(255,0,85,0.12)}
+  .card::after{content:"";position:absolute;inset:0;border-radius:22px;pointer-events:none;border:1px solid rgba(255,255,255,0.06)}
+  .card h2{font-size:15px;margin-bottom:20px;color:#fff;letter-spacing:2px;display:flex;align-items:center;gap:12px;text-transform:uppercase;font-family:'Orbitron',sans-serif}
+  .card h2 .dot{width:10px;height:10px;border-radius:50%;background:#ff0055;box-shadow:0 0 18px #ff0055, 0 0 6px #fff}
+  label{display:block;font-size:11px;color:#94a3b8;margin-bottom:8px;letter-spacing:1.5px;text-transform:uppercase;font-weight:700}
+  input,textarea,select{width:100%;background:rgba(2,2,6,0.95);border:1px solid rgba(255,0,85,0.4);border-radius:14px;padding:13px 18px;color:#f8fafc;font-size:14px;font-family:inherit;outline:none;transition:all 0.3s ease}
+  input:focus,textarea:focus,select:focus{border-color:#ff0055;box-shadow:0 0 0 3px rgba(255,0,85,0.3), 0 0 30px rgba(255,0,85,0.4)}
+  input:disabled{color:#475569;cursor:not-allowed}
+  textarea{resize:vertical;min-height:100px}
+  .field{margin-bottom:18px}
+  button{background:linear-gradient(135deg,#ff0055,#990033);color:#fff;border:none;border-radius:14px;padding:15px 26px;font-size:12px;font-weight:700;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:all 0.3s ease;margin-top:6px;width:100%;box-shadow:0 10px 30px rgba(255,0,85,0.4), inset 0 1px 0 rgba(255,255,255,0.35);font-family:'Orbitron',sans-serif}
+  button:hover:not(:disabled){transform:translateY(-2px);box-shadow:0 15px 40px rgba(255,0,85,0.7), 0 0 25px rgba(255,0,85,0.5)}
+  button:disabled{background:#1e1e2d;color:#475569;cursor:not-allowed;box-shadow:none}
+  button.ghost{background:transparent;border:1px solid rgba(255,0,85,0.6);color:#ff5288;box-shadow:none}
+  button.ghost:hover:not(:disabled){background:rgba(255,0,85,0.18);color:#fff}
+  button.danger{background:linear-gradient(135deg,#ff0033,#700018);border:1px solid #ff0055;box-shadow:0 10px 30px rgba(255,0,51,0.5)}
+  .btnrow{display:flex;gap:14px}
   .btnrow button{margin-top:0}
-
-  .status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;gap:12px;flex-wrap:wrap}
-  .badge{display:inline-block;padding:8px 18px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:'Orbitron',sans-serif;}
-  .b-idle{background:rgba(120,120,140,0.15);color:#a8a8b8;border:1px solid rgba(120,120,140,0.35)}
-  .b-wait{background:rgba(255,180,0,0.15);color:#ffc655;border:1px solid rgba(255,180,0,0.45);animation:pulse 1.6s infinite}
-  .b-paired{background:rgba(255,0,60,0.15);color:#ff5277;border:1px solid rgba(255,0,60,0.6);box-shadow:0 0 20px rgba(255,0,60,0.3)}
-  .b-run{background:rgba(56,239,125,0.15);color:#38ef7d;border:1px solid rgba(56,239,125,0.6);box-shadow:0 0 20px rgba(56,239,125,0.35);animation:pulse 1.6s infinite}
+  .status-row{display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;gap:12px;flex-wrap:wrap}
+  .badge{display:inline-block;padding:8px 20px;border-radius:999px;font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;font-family:'Orbitron',sans-serif}
+  .b-idle{background:rgba(100,116,139,0.15);color:#94a3b8;border:1px solid rgba(100,116,139,0.4)}
+  .b-wait{background:rgba(245,158,11,0.15);color:#fbbf24;border:1px solid rgba(245,158,11,0.5);animation:pulse 1.6s infinite}
+  .b-paired{background:rgba(255,0,85,0.15);color:#ff5288;border:1px solid rgba(255,0,85,0.65);box-shadow:0 0 25px rgba(255,0,85,0.35)}
+  .b-run{background:rgba(16,185,129,0.15);color:#34d399;border:1px solid rgba(16,185,129,0.65);box-shadow:0 0 25px rgba(16,185,129,0.4);animation:pulse 1.6s infinite}
   @keyframes pulse{0%,100%{opacity:1}50%{opacity:0.5}}
-
-  .code-box{
-    background:rgba(3,3,6,0.9);border:2px dashed #ff003c;border-radius:16px;
-    padding:28px 20px;margin:20px 0;text-align:center;
-    box-shadow:inset 0 0 35px rgba(255,0,60,0.15), 0 0 25px rgba(255,0,60,0.2);
-  }
-  .code-label{font-size:11px;color:#a0a0b5;letter-spacing:3px;margin-bottom:12px;text-transform:uppercase;font-weight:700}
-  .code-value{font-size:36px;font-weight:900;letter-spacing:8px;color:#ff003c;
-    font-family:'Orbitron',monospace;text-shadow:0 0 25px rgba(255,0,60,0.8)}
-  .code-value.loading{font-size:16px;letter-spacing:1px;color:#a0a0b5;font-style:italic;text-shadow:none}
-
-  .steps{background:rgba(3,3,6,0.6);border:1px solid rgba(255,0,60,0.25);border-radius:14px;
-    padding:18px;font-size:13px;line-height:2;color:#d0d0e0}
+  .code-box{background:rgba(2,2,6,0.98);border:2px dashed #ff0055;border-radius:18px;padding:30px 22px;margin:22px 0;text-align:center;box-shadow:inset 0 0 40px rgba(255,0,85,0.2), 0 0 30px rgba(255,0,85,0.3)}
+  .code-label{font-size:11px;color:#94a3b8;letter-spacing:3px;margin-bottom:12px;text-transform:uppercase;font-weight:700}
+  .code-value{font-size:38px;font-weight:900;letter-spacing:8px;color:#ff0055;font-family:'Orbitron',monospace;text-shadow:0 0 30px rgba(255,0,85,0.9)}
+  .code-value.loading{font-size:16px;letter-spacing:1px;color:#94a3b8;font-style:italic;text-shadow:none}
+  .steps{background:rgba(2,2,6,0.7);border:1px solid rgba(255,0,85,0.3);border-radius:16px;padding:20px;font-size:13px;line-height:2.1;color:#cbd5e1}
   .steps b{color:#fff}
-
-  .msg{margin-top:14px;padding:12px 16px;border-radius:12px;font-size:13px;display:none}
-  .msg.ok{background:rgba(255,0,60,0.12);color:#ff8ba6;border:1px solid rgba(255,0,60,0.4);display:block}
-  .msg.err{background:rgba(255,60,60,0.12);color:#ffa1a1;border:1px solid rgba(255,60,60,0.4);display:block}
-
-  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px}
-  @media(max-width:520px){.grid2{grid-template-columns:1fr}}
-  .stat{background:rgba(3,3,6,0.65);border:1px solid rgba(255,0,60,0.25);
-    border-radius:16px;padding:16px;text-align:center}
-  .stat .k{font-size:10px;color:#a0a0b5;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;font-weight:700}
-  .stat .v{font-size:24px;font-weight:900;color:#fff;text-shadow:0 0 15px rgba(255,0,60,0.4);word-break:break-all;font-family:'Orbitron',sans-serif;}
-  .stat .v.red{color:#ff003c}
-  .stat .v.green{color:#38ef7d;text-shadow:0 0 15px rgba(56,239,125,0.5)}
+  .msg{margin-top:14px;padding:14px 18px;border-radius:14px;font-size:13px;display:none}
+  .msg.ok{background:rgba(255,0,85,0.14);color:#ff99bb;border:1px solid rgba(255,0,85,0.45);display:block}
+  .msg.err{background:rgba(239,68,68,0.14);color:#fca5a5;border:1px solid rgba(239,68,68,0.45);display:block}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+  @media(max-width:540px){.grid2{grid-template-columns:1fr}}
+  .stat{background:rgba(2,2,6,0.75);border:1px solid rgba(255,0,85,0.3);border-radius:18px;padding:18px;text-align:center}
+  .stat .k{font-size:10px;color:#94a3b8;letter-spacing:2px;text-transform:uppercase;margin-bottom:6px;font-weight:700}
+  .stat .v{font-size:26px;font-weight:900;color:#fff;text-shadow:0 0 18px rgba(255,0,85,0.5);word-break:break-all;font-family:'Orbitron',sans-serif}
+  .stat .v.red{color:#ff0055}
+  .stat .v.green{color:#34d399;text-shadow:0 0 18px rgba(52,211,153,0.6)}
   .stat .v.small{font-size:14px;font-weight:700}
-  .statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-bottom:14px}
-  @media(max-width:520px){.statgrid{grid-template-columns:1fr 1fr}}
-
-  .log{background:#010103;border:1px solid rgba(255,0,60,0.3);border-radius:16px;
-    padding:16px;height:350px;overflow-y:auto;font-family:'Courier New',monospace;
-    font-size:12px;line-height:1.8;box-shadow:inset 0 0 40px rgba(255,0,60,0.08)}
+  .statgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-bottom:16px}
+  @media(max-width:540px){.statgrid{grid-template-columns:1fr 1fr}}
+  .log{background:#010104;border:1px solid rgba(255,0,85,0.4);border-radius:18px;padding:18px;height:360px;overflow-y:auto;font-family:'Courier New',monospace;font-size:12px;line-height:1.9;box-shadow:inset 0 0 45px rgba(255,0,85,0.1)}
   .log::-webkit-scrollbar{width:8px}
-  .log::-webkit-scrollbar-track{background:#050508}
-  .log::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
-  .log .line{color:#a0a0b5;border-bottom:1px dashed rgba(255,255,255,0.04);padding:3px 0;word-break:break-all}
-  .log .t{color:#ff5277;margin-right:8px;font-weight:bold}
-  .log .ok{color:#38ef7d}
-  .log .err{color:#ff6b6b}
-  .log .info{color:#6bc6ff}
-  .log .warn{color:#ffc655}
-
-  .progress{height:10px;background:rgba(3,3,6,0.9);border-radius:99px;overflow:hidden;
-    border:1px solid rgba(255,0,60,0.3);margin-top:14px}
-  .progress > div{height:100%;width:0%;
-    background:linear-gradient(90deg,#ff003c,#ff5277,#ff003c);
-    background-size:200% 100%;transition:width 0.4s ease;animation:shine 2s linear infinite}
+  .log::-webkit-scrollbar-track{background:#04040a}
+  .log::-webkit-scrollbar-thumb{background:#ff0055;border-radius:8px}
+  .log .line{color:#94a3b8;border-bottom:1px dashed rgba(255,255,255,0.05);padding:4px 0;word-break:break-all}
+  .log .t{color:#ff5288;margin-right:8px;font-weight:bold}
+  .log .ok{color:#34d399}
+  .log .err{color:#f87171}
+  .log .info{color:#38bdf8}
+  .log .warn{color:#fbbf24}
+  .progress{height:12px;background:rgba(2,2,6,0.95);border-radius:99px;overflow:hidden;border:1px solid rgba(255,0,85,0.4);margin-top:16px}
+  .progress > div{height:100%;width:0%;background:linear-gradient(90deg,#ff0055,#ff758c,#ff0055);background-size:200% 100%;transition:width 0.4s ease;animation:shine 2s linear infinite}
   @keyframes shine{0%{background-position:0 0}100%{background-position:200% 0}}
-
-  .groups-toolbar{display:flex;gap:10px;align-items:center;margin-bottom:12px;flex-wrap:wrap}
-  .groups-toolbar button{width:auto;margin-top:0;padding:10px 16px;font-size:11px}
-  .groups-toolbar .count{font-size:12px;color:#a0a0b5;margin-left:auto;letter-spacing:1px;font-weight:700}
-  .groups-list{
-    background:rgba(3,3,6,0.7);border:1px solid rgba(255,0,60,0.25);border-radius:16px;
-    max-height:360px;overflow-y:auto;padding:8px;
-  }
+  .groups-toolbar{display:flex;gap:12px;align-items:center;margin-bottom:14px;flex-wrap:wrap}
+  .groups-toolbar button{width:auto;margin-top:0;padding:11px 18px;font-size:11px}
+  .groups-toolbar .count{font-size:12px;color:#94a3b8;margin-left:auto;letter-spacing:1px;font-weight:700}
+  .groups-list{background:rgba(2,2,6,0.8);border:1px solid rgba(255,0,85,0.3);border-radius:18px;max-height:380px;overflow-y:auto;padding:10px}
   .groups-list::-webkit-scrollbar{width:8px}
-  .groups-list::-webkit-scrollbar-track{background:#050508}
-  .groups-list::-webkit-scrollbar-thumb{background:#ff003c;border-radius:8px}
-  .group-item{
-    display:flex;align-items:center;gap:14px;padding:12px 14px;border-radius:12px;
-    cursor:pointer;transition:all 0.2s ease;border:1px solid transparent;
-  }
-  .group-item:hover{background:rgba(255,0,60,0.1);border-color:rgba(255,0,60,0.3)}
-  .group-item.selected{background:rgba(255,0,60,0.18);border-color:#ff003c;box-shadow:0 0 15px rgba(255,0,60,0.15)}
-  .group-item input[type=checkbox]{
-    width:20px;height:20px;accent-color:#ff003c;cursor:pointer;flex-shrink:0;
-  }
+  .groups-list::-webkit-scrollbar-track{background:#04040a}
+  .groups-list::-webkit-scrollbar-thumb{background:#ff0055;border-radius:8px}
+  .group-item{display:flex;align-items:center;gap:16px;padding:13px 16px;border-radius:14px;cursor:pointer;transition:all 0.2s ease;border:1px solid transparent}
+  .group-item:hover{background:rgba(255,0,85,0.14);border-color:rgba(255,0,85,0.4)}
+  .group-item.selected{background:rgba(255,0,85,0.22);border-color:#ff0055;box-shadow:0 0 20px rgba(255,0,85,0.25)}
+  .group-item input[type=checkbox]{width:20px;height:20px;accent-color:#ff0055;cursor:pointer;flex-shrink:0}
   .group-info{flex:1;min-width:0}
-  .group-name{color:#f1f1f6;font-size:13px;font-weight:700;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-  .group-jid{color:#808095;font-size:11px;font-family:'Courier New',monospace;
-    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
-  .group-meta{color:#ff5277;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0;font-weight:700}
-
+  .group-name{color:#f8fafc;font-size:13px;font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .group-jid{color:#64748b;font-size:11px;font-family:'Courier New',monospace;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:2px}
+  .group-meta{color:#ff5288;font-size:10px;letter-spacing:1px;text-transform:uppercase;flex-shrink:0;font-weight:700}
   .hidden{display:none!important}
-  .hint{font-size:11px;color:#808095;margin-top:8px;letter-spacing:0.5px}
-  .empty{padding:35px 20px;text-align:center;color:#808095;font-size:13px}
-  .footer{text-align:center;color:#555568;font-size:11px;letter-spacing:3px;margin-top:35px;text-transform:uppercase;font-weight:700}
-
-  .queue-box{
-    background:rgba(3,3,6,0.85);border:1px solid rgba(255,0,60,0.3);border-radius:14px;
-    padding:14px;margin-top:10px;font-size:12px;color:#d0d0e0;
-    max-height:145px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.7;
-  }
-  .queue-box .qi{color:#6bc6ff;margin-right:8px;font-weight:bold}
+  .hint{font-size:11px;color:#64748b;margin-top:8px;letter-spacing:0.5px}
+  .empty{padding:40px 20px;text-align:center;color:#64748b;font-size:13px}
+  .footer{text-align:center;color:#475569;font-size:11px;letter-spacing:4px;margin-top:40px;text-transform:uppercase;font-weight:700}
+  .queue-box{background:rgba(2,2,6,0.95);border:1px solid rgba(255,0,85,0.4);border-radius:16px;padding:16px;margin-top:12px;font-size:12px;color:#cbd5e1;max-height:160px;overflow-y:auto;font-family:'Courier New',monospace;line-height:1.8}
+  .queue-box .qi{color:#38bdf8;margin-right:8px;font-weight:bold}
 </style>
 </head>
 <body>
 
-<div class="live-bg"></div>
+<div class="matrix-bg"></div>
 <div class="cyber-grid"></div>
-<div class="floating-orbs"><div class="orb"></div><div class="orb"></div></div>
+<div class="orb-container"><div class="neon-orb"></div><div class="neon-orb"></div></div>
 
 <div class="container">
   <div class="brand">
     <h1>RK <span class="x">X</span> RAJA</h1>
-    <p>Secure Multi-Session Control Center</p>
+    <p>Elite Pro Cyber Matrix Center</p>
   </div>
 
   <div class="tabs">
@@ -620,16 +512,16 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
   <div class="panel active" id="panel-dashboard">
     <div class="card">
-      <h2><span class="dot"></span>Select or Create Session</h2>
+      <h2><span class="dot"></span>Select or Create Session (Multi-User)</h2>
       <div class="field">
         <label>Active Session Name</label>
-        <div style="display:flex;gap:10px">
+        <div style="display:flex;gap:12px">
           <select id="dashSessionSelect" onchange="onSessionChange()"></select>
           <button class="ghost" style="width:auto;margin-top:0" onclick="createNewSessionPrompt()">+ New Session</button>
         </div>
       </div>
-      <div class="field" style="margin-top:12px">
-        <label>Session Security Password (Required for controlling session)</label>
+      <div class="field" style="margin-top:14px">
+        <label>Session Owner Password (Strict Authorization)</label>
         <input id="sessionPassword" type="password" placeholder="Enter session password..." oninput="savePassword()"/>
       </div>
     </div>
@@ -654,15 +546,15 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
       <div id="codeSection" class="hidden">
         <div class="code-box">
-          <div class="code-label">Your Pairing Code</div>
+          <div class="code-label">Your Secure Pairing Code</div>
           <div id="codeValue" class="code-value loading">Generating...</div>
         </div>
         <div class="steps">
-          <b>Steps:</b><br/>
-          1. Open WhatsApp<br/>
-          2. Go to <b>Linked Devices</b><br/>
-          3. <b>Link a Device</b> → <b>Link with phone number</b><br/>
-          4. Enter the code above
+          <b>Instructions:</b><br/>
+          1. Open WhatsApp on your phone<br/>
+          2. Tap Menu or Settings → <b>Linked Devices</b><br/>
+          3. Tap <b>Link a Device</b> → <b>Link with phone number instead</b><br/>
+          4. Enter the 8-character code shown above
         </div>
       </div>
       <div id="pairMsg" class="msg"></div>
@@ -680,9 +572,9 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         <div class="empty">Pair WhatsApp first, then click "Refresh Groups"</div>
       </div>
 
-      <div class="field" style="margin-top:18px">
-        <label>Message to send to selected groups</label>
-        <textarea id="groupMsgInput" placeholder="Enter instant message to broadcast..."></textarea>
+      <div class="field" style="margin-top:20px">
+        <label>Instant Broadcast Message</label>
+        <textarea id="groupMsgInput" placeholder="Enter instant broadcast message..."></textarea>
       </div>
       <button id="groupSendBtn" onclick="sendToSelectedGroups()">Send to Selected Groups</button>
       <div id="groupSendMsg" class="msg"></div>
@@ -690,7 +582,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card">
       <h2><span class="dot"></span>Danger Zone</h2>
-      <p class="hint">Logout requires correct session password.</p>
+      <p class="hint">Logging out or wiping session requires the correct owner password.</p>
       <button class="ghost" onclick="logout()">Logout / Delete Session</button>
     </div>
   </div>
@@ -718,19 +610,19 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
           <div class="field">
             <label>Send to Groups (fetch & pick)</label>
-            <div class="groups-toolbar" style="margin-bottom:8px">
+            <div class="groups-toolbar" style="margin-bottom:10px">
               <button class="ghost" onclick="fetchGroupsForBulk()">Fetch Groups</button>
               <button class="ghost" onclick="selectAllBulkGroups()">All</button>
               <button class="ghost" onclick="clearBulkGroups()">Clear</button>
               <span class="count" id="bulkGroupsCount">0 selected</span>
             </div>
-            <div class="groups-list" id="bulkGroupsList" style="max-height:200px">
+            <div class="groups-list" id="bulkGroupsList" style="max-height:220px">
               <div class="empty">Click "Fetch Groups" to load</div>
             </div>
           </div>
 
           <div class="field">
-            <label>Hater Name (optional prefix for each message)</label>
+            <label>Hater Name (optional prefix)</label>
             <input id="haterInput" type="text" placeholder="e.g. 9man X YAMDHUT"/>
           </div>
           <div class="field">
@@ -751,7 +643,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
       <div>
         <div class="card">
-          <h2><span class="dot"></span>Live Stats</h2>
+          <h2><span class="dot"></span>Live Matrix Stats</h2>
           <div class="statgrid">
             <div class="stat"><div class="k">Status</div><div class="v" id="statStatus">Idle</div></div>
             <div class="stat"><div class="k">Paired</div><div class="v" id="statPaired">—</div></div>
@@ -768,7 +660,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
             <div class="stat"><div class="k">Progress</div><div class="v" id="statProgress">0%</div></div>
           </div>
 
-          <div class="grid2" style="margin-top:14px">
+          <div class="grid2" style="margin-top:16px">
             <div class="stat"><div class="k">Current Message</div><div class="v small" id="statCurMsg">—</div></div>
             <div class="stat"><div class="k">Current Target</div><div class="v small" id="statCurTarget">—</div></div>
           </div>
@@ -777,11 +669,11 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
         </div>
 
         <div class="card">
-          <h2><span class="dot"></span>Live Cyber Log</h2>
+          <h2><span class="dot"></span>Live Matrix Cyber Log</h2>
           <div class="log" id="logBox">
-            <div class="line"><span class="t">[boot]</span> Secure multi-session system initialized. Ready...</div>
+            <div class="line"><span class="t">[boot]</span> Elite Matrix Multi-Session Core Online. Ready...</div>
           </div>
-          <div class="btnrow" style="margin-top:14px">
+          <div class="btnrow" style="margin-top:16px">
             <button class="ghost" onclick="clearLog()">Clear Log</button>
             <button class="danger" onclick="stopTask()">Stop Task</button>
           </div>
@@ -790,7 +682,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
     </div>
   </div>
 
-  <div class="footer">RK RAJA XWD 💀 © — Secure Cyber Edition</div>
+  <div class="footer">RK RAJA XWD 💀 © — Elite Pro Cyber Edition</div>
 </div>
 
 <script>
@@ -875,8 +767,8 @@ async function createNewSessionPrompt(){
   const clean = name.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
   if(!clean) return;
 
-  const pwd = prompt('Set a security password for session "'+clean+'" (Only you can control it with this password):');
-  if(!pwd) return alert('Password is required to secure your session!');
+  const pwd = prompt('Set a strict security password for session "'+clean+'" (Only you can control it):');
+  if(!pwd) return alert('Password is required to secure your multi-user session!');
 
   try {
     const res = await fetch('/api/sessions/create', {
@@ -909,7 +801,7 @@ async function startPair(){
   const msgEl=document.getElementById('pairMsg');
   const codeSection=document.getElementById('codeSection');
   if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
-  if(!pwd){alert('Enter session password first!');return;}
+  if(!pwd){alert('Enter session owner password first!');return;}
 
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
@@ -922,21 +814,21 @@ async function startPair(){
     codeSection.classList.remove('hidden');
     document.getElementById('codeValue').textContent='Generating...';
     document.getElementById('codeValue').classList.add('loading');
-    showMsg(msgEl,'ok','Pairing started — code appears shortly');
+    showMsg(msgEl,'ok','Pairing sequence initialized — code incoming');
   }catch(e){showMsg(msgEl,'err',e.message);}
   finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
 }
 
 async function logout(){
   const pwd=getPassword();
-  if(!confirm('Logout session "'+currentSession+'"? Password required.'))return;
+  if(!confirm('Logout session "'+currentSession+'"? Owner password required.'))return;
   try{
     const res = await fetch('/api/logout',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({session: currentSession, password: pwd})
     });
     const d = await res.json();
-    if(!d.success) throw new Error(d.error || 'Unauthorized');
+    if(!d.success) throw new Error(d.error || 'Unauthorized: Incorrect password!');
     delete sessionPasswords[currentSession];
     localStorage.setItem('sessionPasswords', JSON.stringify(sessionPasswords));
     await loadSessions();
@@ -960,10 +852,10 @@ async function fetchGroups(){
     allGroups = d.groups || [];
     renderDashGroups();
     renderBulkGroups();
-    log('info', 'Fetched '+allGroups.length+' groups');
+    log('info', 'Successfully fetched '+allGroups.length+' groups');
   }catch(e){
-    listEl.innerHTML='<div class="empty" style="color:#ff6b6b">'+escapeHtml(e.message)+'</div>';
-    log('err','Fetch groups: '+e.message);
+    listEl.innerHTML='<div class="empty" style="color:#f87171">'+escapeHtml(e.message)+'</div>';
+    log('err','Fetch groups error: '+e.message);
   }finally{
     btn.disabled=false;btn.textContent='Refresh Groups';
   }
@@ -1002,7 +894,7 @@ async function sendToSelectedGroups(){
   const box=document.getElementById('groupSendMsg');
   const btn=document.getElementById('groupSendBtn');
   if(!dashSelected.size){showMsg(box,'err','Select at least one group');return;}
-  if(!msg){showMsg(box,'err','Enter a message');return;}
+  if(!msg){showMsg(box,'err','Enter a broadcast message');return;}
   btn.disabled=true;btn.textContent='Sending...';showMsg(box,'','');
   try{
     const res=await fetch('/api/send-groups',{
@@ -1011,9 +903,9 @@ async function sendToSelectedGroups(){
     });
     const d=await res.json();
     if(!d.success) throw new Error(d.error||'Failed');
-    showMsg(box,'ok','Sent to '+d.sent+'/'+d.total+' groups');
-    log('ok','Group send: '+d.sent+'/'+d.total+' success');
-  }catch(e){showMsg(box,'err',e.message);log('err','Group send: '+e.message);}
+    showMsg(box,'ok','Broadcast sent to '+d.sent+'/'+d.total+' groups');
+    log('ok','Broadcast send: '+d.sent+'/'+d.total+' success');
+  }catch(e){showMsg(box,'err',e.message);log('err','Broadcast send: '+e.message);}
   finally{btn.disabled=false;btn.textContent='Send to Selected Groups';}
 }
 async function fetchGroupsForBulk(){
@@ -1064,7 +956,7 @@ document.getElementById('fileInput').addEventListener('change',async (e)=>{
     });
     if(!msgs.length){box.style.display='none';return;}
     box.style.display='block';
-    box.innerHTML='<div style="color:#a0a0b5;margin-bottom:6px">Queue ('+msgs.length+' messages)</div>'+
+    box.innerHTML='<div style="color:#94a3b8;margin-bottom:6px">Queue ('+msgs.length+' messages)</div>'+
       msgs.map((m,i)=>'<div><span class="qi">'+(i+1)+'.</span>'+escapeHtml(m.slice(0,80))+(m.length>80?'…':'')+'</div>').join('');
   }catch(_){box.style.display='none';}
 });
@@ -1092,12 +984,12 @@ async function startServer(){
   fd.append('lastHater',lastHater);
   fd.append('groupIds',JSON.stringify([...bulkSelected]));
 
-  log('info','Starting precise 24/7 loop for session: '+currentSession);
+  log('info','Launching 24/7 continuous loop for session: '+currentSession);
   try{
     const res=await fetch('/api/bulk/start',{method:'POST',body:fd});
     const d=await res.json();
     if(!d.success)throw new Error(d.error||'Failed');
-    log('ok','Task running with exact delay — '+d.total+' messages');
+    log('ok','24/7 loop active — Total messages: '+d.total);
     stopBtn.disabled=false;
   }catch(e){
     log('err','Start failed: '+e.message);
@@ -1107,14 +999,16 @@ async function startServer(){
   }
 }
 async function stopTask(){
+  const pwd = getPassword();
+  if(!pwd){alert('Enter session owner password to stop the task!');return;}
   try{
     const res=await fetch('/api/bulk/stop',{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session: currentSession, password: getPassword()})
+      body:JSON.stringify({session: currentSession, password: pwd})
     });
     const d=await res.json();
-    if(d.success) log('warn','Emergency stop executed for session: '+currentSession);
-    else log('err',d.error||'Unauthorized or no task running');
+    if(d.success) log('warn','Emergency stop executed successfully for session: '+currentSession);
+    else log('err',d.error||'Unauthorized! Only the session owner can stop this task.');
   }catch(e){log('err',e.message);}
 }
 
@@ -1167,7 +1061,7 @@ async function pollStats(){
     const d=await res.json();
     const statusEl=document.getElementById('statStatus');
     statusEl.textContent=d.running?'Running 24/7':'Idle';
-    statusEl.style.color=d.running?'#38ef7d':'#fff';
+    statusEl.style.color=d.running?'#34d399':'#fff';
 
     document.getElementById('statPaired').textContent=d.paired?'Yes':'No';
     document.getElementById('statUptime').textContent=d.uptimeFormatted||'00:00:00';
@@ -1186,7 +1080,7 @@ async function pollStats(){
 
     const startBtn=document.getElementById('startBtn');
     const stopBtn=document.getElementById('stopBtn');
-    if(d.running){startBtn.disabled=true;stopBtn.disabled=false;}
+    if(d.running){startBtn.disabled=false;stopBtn.disabled=false;}
     else{startBtn.disabled=false;stopBtn.disabled=true;}
 
     if(d.logs&&d.logs.length){
@@ -1261,13 +1155,12 @@ app.post('/api/pair', async (req, res) => {
     const sess = getOrCreateSession(session);
 
     if (!phone || !/^\d{10,15}$/.test(phone)) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number' });
+      return res.status(400).json({ success: false, error: 'Invalid phone number format' });
     }
     if (sess.isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection in progress' });
+      return res.status(400).json({ success: false, error: 'Connection already in progress' });
     }
     
-    // Completely wipe old corrupted auth files to guarantee fresh pairing token generation
     if (fs.existsSync(sess.authDir)) {
       try {
         fs.rmSync(sess.authDir, { recursive: true, force: true });
@@ -1278,7 +1171,7 @@ app.post('/api/pair', async (req, res) => {
       sess.lastError = e.message;
     });
 
-    res.json({ success: true, message: 'Pairing initiated' });
+    res.json({ success: true, message: 'Pairing handshake initialized' });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -1385,7 +1278,7 @@ app.post('/api/logout', async (req, res) => {
     const { session, password } = req.body;
     const sessName = session || 'default';
     if (!verifyAuth(sessName, password)) {
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only owner can logout.' });
     }
 
     const sess = sessions[sessName];
@@ -1405,7 +1298,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const { session, password, hater, delay, lastHater, groupIds } = req.body;
     if (!verifyAuth(session, password)) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+      return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password! Only session owner can start tasks.' });
     }
 
     const sess = getOrCreateSession(session);
@@ -1416,7 +1309,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     }
     if (sess.bulkState.running) {
       if (req.file) { try { fs.unlinkSync(req.file.path); } catch (_) {} }
-      return res.status(400).json({ success: false, error: 'A task is already running.' });
+      return res.status(400).json({ success: false, error: 'A task is already running on this session.' });
     }
     if (!req.file) {
       return res.status(400).json({ success: false, error: 'Please upload a .txt file' });
@@ -1481,7 +1374,7 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     sess.bulkState.workerAlive = false;
     sess.bulkState.lastBeat = Date.now();
 
-    sess.pushLog('info', `Precise Loop launched — ${messages.length} messages × ${targets.length} targets with exact ${delaySec}s gap`);
+    sess.pushLog('info', `24/7 Infinite Matrix Loop launched — ${messages.length} messages × ${targets.length} targets`);
 
     sess.runWorker();
 
@@ -1494,13 +1387,16 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
 app.post('/api/bulk/stop', (req, res) => {
   const { session, password } = req.body;
   if (!verifyAuth(session, password)) {
-    return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
+    return res.status(401).json({ success: false, error: 'Unauthorized! Only the session owner with the correct password can stop this task.' });
   }
 
   const sess = getOrCreateSession(session);
+  if (!sess.bulkState.running) {
+    return res.status(400).json({ success: false, error: 'No active task running on this session.' });
+  }
   sess.bulkState.stopFlag = true;
   sess.bulkState.running = false;
-  sess.pushLog('warn', 'Emergency stop signal received from authorized user');
+  sess.pushLog('warn', 'Emergency stop command executed securely by session owner');
   res.json({ success: true });
 });
 
@@ -1530,7 +1426,7 @@ app.get('/api/bulk/status', (req, res) => {
 app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(PORT, HOST, () => {
-  console.log('\n🌐 Ultimate Cyberpunk Dashboard: http://' + HOST + ':' + PORT + '/\n');
+  console.log('\n🚀 RK RAJA XWD Pro Cyber Matrix Server Live: http://' + HOST + ':' + PORT + '/\n');
 });
 
 process.exit = process.exit || (() => {});
