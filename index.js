@@ -150,19 +150,16 @@ class WhatsAppSession {
     }
   }
 
-  async connect(phone, forceNewCode = false) {
+  async connect(phone) {
     if (!phone) throw new Error('Phone number required');
     if (this.isConnecting) throw new Error('Connection already in progress');
     if (this.isPaired) throw new Error('Session already active');
 
-    if (forceNewCode) {
-      this.pairingCode = null; 
-      this.pairingRequested = false; 
-      this.pairingCodeGeneratedAt = 0;
-    }
     this.isConnecting = true; 
     this.currentPhone = phone; 
     this.lastError = null;
+    this.pairingCode = null;
+    this.pairingRequested = false;
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
@@ -176,15 +173,12 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        // Chrome browser signature mimics web client perfectly to prevent rejection
-        browser: Browsers.appropriate('Chrome'),
+        browser: Browsers.macOS('Desktop'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
-        emitOwnEvents: true,
-        getMessage: async () => ({ conversation: 'hello' })
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -206,7 +200,7 @@ class WhatsAppSession {
               const formattedPhone = phone.replace(/[^0-9]/g, '');
               const code = await this.sock.requestPairingCode(formattedPhone);
               this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-              this.pushLog('info', `Pairing Code Generated Successfully: ${this.pairingCode}`);
+              this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
               this.lastError = null;
               this.isConnecting = false;
             } catch (err) {
@@ -216,7 +210,7 @@ class WhatsAppSession {
               this.pairingRequested = false;
               this.isConnecting = false;
             }
-          }, 4000);
+          }, 2000);
         }
 
         if (connection === 'open') {
@@ -240,7 +234,7 @@ class WhatsAppSession {
           this.isConnecting = false;
 
           if (statusCode === DisconnectReason.restartRequired) {
-             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
+             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 2000);
              return;
           }
 
@@ -253,7 +247,7 @@ class WhatsAppSession {
 
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           if (shouldReconnect && this.currentPhone) {
-            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
+            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null; 
             this.bulkState.stopFlag = true;
@@ -753,7 +747,7 @@ async function startPair(){
   }
   if(!pwd){alert('Enter session owner password first!');return;}
 
-  btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
+  btn.disabled=true;btn.textContent='Initializing...';showMsg(msgEl,'','');
   try{
     const res=await fetch('/api/pair',{
       method:'POST',headers:{'Content-Type':'application/json'},
@@ -762,11 +756,14 @@ async function startPair(){
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
-    document.getElementById('codeValue').textContent='Generating...';
+    document.getElementById('codeValue').textContent='Generating Code...';
     document.getElementById('codeValue').classList.add('loading');
-    showMsg(msgEl,'ok','Pairing sequence initialized — code incoming');
-  }catch(e){showMsg(msgEl,'err',e.message);}
-  finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
+    showMsg(msgEl,'ok','Pairing sequence initialized — check your WhatsApp');
+  }catch(e){
+    showMsg(msgEl,'err',e.message);
+  }finally{
+    btn.disabled=false;btn.textContent='Get Pairing Code';
+  }
 }
 
 async function logout(){
@@ -1105,7 +1102,6 @@ app.post('/api/pair', async (req, res) => {
 
     const cleanName = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
     
-    // Purana connection close aur wipe karo taaki fresh handshake ho sake
     if (sessions[cleanName]) {
       try {
         if (sessions[cleanName].sock) {
@@ -1128,7 +1124,9 @@ app.post('/api/pair', async (req, res) => {
     }
 
     const sess = getOrCreateSession(cleanName);
-    sess.connect(cleanPhone, true).catch((e) => {
+    
+    // Non-blocking connection trigger
+    sess.connect(cleanPhone).catch((e) => {
       sess.lastError = e.message;
     });
 
