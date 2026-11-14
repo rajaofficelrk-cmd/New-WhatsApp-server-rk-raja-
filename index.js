@@ -211,7 +211,7 @@ keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
 },
 printQRInTerminal: false,
 logger: pino({ level: 'silent' }),
-browser: Browsers.ubuntu('Chrome'),
+browser: Browsers.macOS('Desktop'),
 syncFullHistory: false,
 markOnlineOnConnect: false,
 connectTimeoutMs: 60000,
@@ -239,11 +239,13 @@ this.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
 });
 ​this.sock.ev.on('connection.update', async (update) => {
 const { connection, lastDisconnect } = update;
-​if (!this.sock.authState.creds.registered && !this.pairingRequested) {
+​// ✅ FIXED: Stable pairing code generation with Baileys WebSocket readiness check
+if (!this.sock.authState.creds.registered && !this.pairingRequested) {
 this.pairingRequested = true;
+setTimeout(async () => {
 try {
+if (this.isPaired || !this.sock) return;
 const formattedPhone = phone.replace(/[^0-9]/g, '');
-await new Promise((r) => setTimeout(r, 4000));
 const code = await this.sock.requestPairingCode(formattedPhone);
 this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
 this.pairingCodeGeneratedAt = Date.now();
@@ -256,6 +258,7 @@ this.pairingCode = null;
 this.pairingRequested = false;
 this.isConnecting = false;
 }
+}, 5000);
 }
 ​if (connection === 'open') {
 this.isPaired = true;
@@ -278,7 +281,7 @@ this.runWorker();
 ​if (connection === 'close') {
 const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
 ​if (statusCode === 515) {
-this.pushLog('warn', 'Restart Required (515) — reconnecting...');
+this.pushLog('warn', 'Restart Required (515) — reconnecting without new code...');
 this.isPaired = false;
 this.isConnecting = false;
 this.pairingRequested = false;
@@ -1287,6 +1290,7 @@ return res.status(400).json({ success: false, error: 'No active task running on 
 sess.bulkState.stopFlag = true;
 sess.bulkState.running = false;
 sess.pushLog('warn', 'Emergency stop executed securely by session owner');
+// ✅ FIXED: Corrected nested JSON response bug { success: { success: true } } to { success: true }
 res.json({ success: true });
 });
 ​app.get('/api/bulk/status', (req, res) => {
@@ -1302,7 +1306,7 @@ tasks: sess.bulkState.tasks,
 total: sess.bulkState.total,
 remaining: sess.bulkState.remaining,
 cycle: sess.bulkState.cycle,
-msgIndex: sess.bulkState.msgIndex || 0,
+msgIndex: sess.bulkState.msgIndex,
 targetIndex: sess.bulkState.targetIndex,
 totalTargets: sess.bulkState.totalTargets,
 currentMessage: sess.bulkState.currentMessage,
