@@ -225,7 +225,6 @@ class WhatsAppSession {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
       const { version } = await fetchLatestBaileysVersion();
 
-      // FIXED: Strictly matched standard Mac/Chrome desktop multi-device configuration to eliminate "Couldn't link device" error
       this.sock = makeWASocket({
         version,
         auth: {
@@ -268,11 +267,11 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect } = update;
 
-        // FIXED: Request pairing code instantly and safely without throwing reject error
         if (connection === 'connecting' && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
-            await new Promise((r) => setTimeout(r, 4000));
+            // Stable delay for stable socket initialization before pairing request
+            await new Promise((r) => setTimeout(r, 5000));
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             this.pairingCode = await this.sock.requestPairingCode(formattedPhone);
             this.pushLog('info', `Pairing code successfully generated for ${formattedPhone}: ${this.pairingCode}`);
