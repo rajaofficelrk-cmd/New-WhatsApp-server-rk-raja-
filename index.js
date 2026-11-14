@@ -2,9 +2,9 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion,
-  makeCacheableSignalKeyStore,
-  Browsers
+  fetchLatestWaWebVersion, // 👈 Latest version fetch
+  Browsers,
+  makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
@@ -44,7 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
-    this.pairingCodeGeneratedAt = 0; // 🕒 Naya: Code generate hone ka time track karne ke liye
+    this.pairingCodeGeneratedAt = 0; // 🕒 Pairing code lock timer
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -217,7 +217,7 @@ class WhatsAppSession {
     if (this.isConnecting) throw new Error('Connection handshake already active');
     if (this.isPaired) throw new Error('Session is already active & paired');
 
-    // 🛠️ FIX: Agar user ne naya code manga hai tabhi reset karo, warna purana code wahi rakho
+    // 🛠️ Strict Pairing Lock: Reset only if user explicitly requests new code
     if (forceNewCode) {
       this.pairingCode = null;
       this.pairingRequested = false;
@@ -240,7 +240,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'), // Standard signature
+        browser: Browsers.ubuntu('Chrome'), // Standard strict signature
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -273,14 +273,14 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // 🛠️ FIX: Pairing code sirf ek baar generate hoga aur 60 second tak valid rahega
+        // 🛠️ Fix: Code generates ONLY once and stays valid for 60 secs
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pairingCodeGeneratedAt = Date.now(); // Time save karo
+            this.pairingCodeGeneratedAt = Date.now(); // Time lock start
             this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
@@ -321,8 +321,7 @@ class WhatsAppSession {
           this.isPaired = false;
           this.isConnecting = false;
 
-          // 🛠️ FIX: Connection drop hone par turant code mat delete karo. 
-          // Agar code 60 second se purana ho gaya hai tabhi delete karo.
+          // 🛠️ Fix: Drop hone par code turant mat delete karo. 60 sec tak wait karo
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
@@ -331,7 +330,7 @@ class WhatsAppSession {
           }
 
           if (shouldReconnect && this.currentPhone) {
-            // Reconnect karte time forceNewCode = false bhejo taaki code change na ho
+            // Reconnect with forceNewCode = false (Preserve old code)
             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null;
@@ -414,6 +413,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .neon-glow:nth-child(1){top:10%;left:15%;width:350px;height:350px;background:#10b981;animation-delay:0s}
   .neon-glow:nth-child(2){bottom:10%;right:15%;width:420px;height:420px;background:#3b82f6;animation-delay:3s}
   @keyframes orbDrift{0%{transform:translate(0,0)}100%{transform:translate(45px,55px)}}
+  
+  /* 🚀 PRO SPLASH TOAST 🚀 */
+  #splash-toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); background: linear-gradient(90deg, #10b981, #047857); color: #fff; padding: 16px 40px; border-radius: 14px; font-weight: 900; font-size: 20px; letter-spacing: 2px; box-shadow: 0 0 40px #10b981, inset 0 0 10px rgba(255,255,255,0.5); transition: top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); z-index: 9999; font-family: 'Orbitron', sans-serif; text-transform: uppercase; text-align: center; }
+  #splash-toast.show { top: 30px; }
+  #splash-toast .sub { display: block; font-size: 12px; text-align: center; margin-top: 6px; color: #a7f3d0; font-family: 'Rajdhani', sans-serif; letter-spacing: 1px; }
+
   .container{max-width:1220px;margin:0 auto;padding:32px 18px 75px;position:relative;z-index:1}
   .brand{text-align:center;margin-bottom:30px}
   .brand h1{font-size:clamp(30px,5.2vw,50px);font-weight:900;letter-spacing:6px;background:linear-gradient(180deg,#ffffff 0%,#e2e8f0 40%,#10b981 120%);-webkit-background-clip:text;background-clip:text;color:transparent;text-shadow:0 0 40px rgba(16,185,129,0.6);font-family:'Orbitron',sans-serif}
@@ -513,6 +518,12 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="cyber-bg"></div>
 <div class="matrix-grid"></div>
 <div class="orb-field"><div class="neon-glow"></div><div class="neon-glow"></div></div>
+
+<!-- 🚀 SPLASH TOAST 🚀 -->
+<div id="splash-toast">
+  RK RAJA XWD
+  <span class="sub">Server Start Ho Gya</span>
+</div>
 
 <div class="container">
   <div class="brand">
@@ -732,6 +743,13 @@ function log(type,msg){
   box.appendChild(el);
   box.scrollTop=box.scrollHeight;
   while(box.children.length>500) box.removeChild(box.firstChild);
+}
+
+// 🚀 SPLASH TOAST LOGIC
+function showSplash() {
+  const toast = document.getElementById('splash-toast');
+  toast.classList.add('show');
+  setTimeout(() => { toast.classList.remove('show'); }, 1000); // 1 second me gayab
 }
 
 async function loadSessions(){
@@ -1006,6 +1024,7 @@ async function startServer(){
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','24/7 loop active — Total messages: '+d.total);
     stopBtn.disabled=false;
+    showSplash(); // 🚀 TOAST TRIGGERED HERE
   }catch(e){
     log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
@@ -1182,7 +1201,6 @@ app.post('/api/pair', async (req, res) => {
       } catch (e) {}
     }
 
-    // 🛠️ FIX: Jab user manually click kare tabhi forceNewCode=true bhejo
     sess.connect(phone, true).catch((e) => {
       sess.lastError = e.message;
     });
