@@ -170,16 +170,21 @@ class WhatsAppSession {
 
       this.sock = makeWASocket({
         version,
-        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
+        auth: {
+          creds: state.creds,
+          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
+        },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        // FIX: macOS Desktop browser signature prevents "Couldn't link device" error rejection on WhatsApp servers
-        browser: Browsers.macOS('Desktop'),
+        // Chrome browser signature mimics web client perfectly to prevent rejection
+        browser: Browsers.appropriate('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
         defaultQueryTimeoutMs: 60000,
         keepAliveIntervalMs: 25000,
+        emitOwnEvents: true,
+        getMessage: async () => ({ conversation: 'hello' })
       });
 
       this.sock.ev.on('creds.update', saveCreds);
@@ -189,7 +194,7 @@ class WhatsAppSession {
       });
 
       this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect } = update;
 
         if (!state.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
@@ -201,8 +206,9 @@ class WhatsAppSession {
               const formattedPhone = phone.replace(/[^0-9]/g, '');
               const code = await this.sock.requestPairingCode(formattedPhone);
               this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-              this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
+              this.pushLog('info', `Pairing Code Generated Successfully: ${this.pairingCode}`);
               this.lastError = null;
+              this.isConnecting = false;
             } catch (err) {
               this.pushLog('err', 'Pairing Failed: ' + err.message);
               this.lastError = err.message;
@@ -210,7 +216,7 @@ class WhatsAppSession {
               this.pairingRequested = false;
               this.isConnecting = false;
             }
-          }, 3000);
+          }, 4000);
         }
 
         if (connection === 'open') {
@@ -473,7 +479,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card" id="pairCard">
       <h2><span class="dot"></span>Pair WhatsApp</h2>
-      <label>Phone Number (country code, no + or spaces)</label>
+      <label>Phone Number (country code, no + or spaces, e.g. 919876543210)</label>
       <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
       <button id="pairBtn" onclick="startPair()">Get Pairing Code</button>
 
@@ -734,12 +740,17 @@ async function createNewSessionPrompt(){
 }
 
 async function startPair(){
-  const phone=document.getElementById('phoneInput').value.trim();
+  const rawPhone=document.getElementById('phoneInput').value.trim();
+  const phone = rawPhone.replace(/[^0-9]/g, '');
   const pwd=getPassword();
   const btn=document.getElementById('pairBtn');
   const msgEl=document.getElementById('pairMsg');
   const codeSection=document.getElementById('codeSection');
-  if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
+  
+  if(!phone || phone.length < 10 || phone.length > 15){
+    showMsg(msgEl,'err','Enter valid number with country code (e.g. 919876543210)');
+    return;
+  }
   if(!pwd){alert('Enter session owner password first!');return;}
 
   btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
@@ -889,7 +900,7 @@ document.getElementById('fileInput').addEventListener('change',async (e)=>{
   try{
     const text=await f.text();
     const seen=new Set(); const msgs=[];
-    text.split(/\\r?\\n/).forEach(line=>{
+    text.split(/\r?\n/).forEach(line=>{
       const t=line.trim();
       if(!t)return; if(seen.has(t))return; seen.add(t); msgs.push(t);
     });
@@ -1092,22 +1103,32 @@ app.post('/api/pair', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
     }
 
-    const sess = getOrCreateSession(session);
-
-    if (!phone || !/^\d{10,15}$/.test(phone)) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number format' });
-    }
-    if (sess.isConnecting) {
-      return res.status(400).json({ success: false, error: 'Connection already in progress' });
-    }
+    const cleanName = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
     
-    if (fs.existsSync(sess.authDir)) {
+    // Purana connection close aur wipe karo taaki fresh handshake ho sake
+    if (sessions[cleanName]) {
       try {
-        fs.rmSync(sess.authDir, { recursive: true, force: true });
+        if (sessions[cleanName].sock) {
+          sessions[cleanName].sock.end(undefined);
+        }
+      } catch (e) {}
+      delete sessions[cleanName];
+    }
+
+    const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
+    if (!cleanPhone || cleanPhone.length < 10 || cleanPhone.length > 15) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number format. Include country code without +' });
+    }
+
+    const authDir = path.join(SESSIONS_BASE_DIR, cleanName);
+    if (fs.existsSync(authDir)) {
+      try {
+        fs.rmSync(authDir, { recursive: true, force: true });
       } catch (e) {}
     }
 
-    sess.connect(phone, true).catch((e) => {
+    const sess = getOrCreateSession(cleanName);
+    sess.connect(cleanPhone, true).catch((e) => {
       sess.lastError = e.message;
     });
 
@@ -1278,7 +1299,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const seen = new Set();
     let parsedGroups = [];
     try { parsedGroups = JSON.parse(groupIds || '[]'); } catch (_) {}
-    parsedGroups.keys().forEach(() => {});
     parsedGroups.forEach((jid) => {
       if (jid && !seen.has(jid)) { seen.add(jid); targets.push({ jid, label: jid }); }
     });
@@ -1296,7 +1316,6 @@ app.post('/api/bulk/start', upload.single('file'), async (req, res) => {
     const preparedMessages = messages.map((m) => prefix + m + suffix);
 
     sess.bulkState.running = true;
-    sess.bulkState.stopGrade = false;
     sess.bulkState.stopFlag = false;
     sess.bulkState.sent = 0;
     sess.bulkState.failed = 0;
