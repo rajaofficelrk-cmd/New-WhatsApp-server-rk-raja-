@@ -44,7 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
-    this.pairingCodeGeneratedAt = 0;
+    this.pairingCodeGeneratedAt = 0; // Timer to lock code
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -54,27 +54,11 @@ class WhatsAppSession {
     this.groupsCache = {};
 
     this.bulkState = {
-      running: false,
-      stopFlag: false,
-      sent: 0,
-      failed: 0,
-      tasks: 0,
-      total: 0,
-      remaining: 0,
-      cycle: 0,
-      msgIndex: 0,
-      targetIndex: 0,
-      totalTargets: 0,
-      currentMessage: '',
-      currentTarget: '',
-      targets: [],
-      messages: [],
-      delayMs: DEFAULT_DELAY_SECONDS * 1000,
-      logs: [],
-      logId: 0,
-      startedAt: null,
-      workerAlive: false,
-      lastBeat: 0,
+      running: false, stopFlag: false, sent: 0, failed: 0, tasks: 0,
+      total: 0, remaining: 0, cycle: 0, msgIndex: 0, targetIndex: 0,
+      totalTargets: 0, currentMessage: '', currentTarget: '',
+      targets: [], messages: [], delayMs: DEFAULT_DELAY_SECONDS * 1000,
+      logs: [], logId: 0, startedAt: null, workerAlive: false, lastBeat: 0,
     };
   }
 
@@ -85,21 +69,14 @@ class WhatsAppSession {
     console.log(`[${this.name}] ${icons[type] || '•'} ${msg}`);
   }
 
-  isSocketReady() {
-    return !!(this.sock && this.isPaired);
-  }
+  isSocketReady() { return !!(this.sock && this.isPaired); }
 
   getGroupsFromStore() {
     const out = [];
     try {
       if (this.sock && this.sock.store && this.sock.store.groupMetadata) {
-        const map = this.sock.store.groupMetadata;
-        map.forEach((v) => {
-          out.push({
-            id: v.id,
-            name: v.subject || '',
-            size: v.participants ? v.participants.length : 0,
-          });
+        this.sock.store.groupMetadata.forEach((v) => {
+          out.push({ id: v.id, name: v.subject || '', size: v.participants ? v.participants.length : 0 });
         });
       }
     } catch (_) {}
@@ -118,9 +95,7 @@ class WhatsAppSession {
         return { ok: true };
       } catch (e) {
         lastErr = e;
-        if (attempt < SEND_RETRY) {
-          await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
-        }
+        if (attempt < SEND_RETRY) await new Promise((r) => setTimeout(r, RETRY_WAIT_MS));
       }
     }
     return { ok: false, error: lastErr ? lastErr.message : 'unknown' };
@@ -129,103 +104,60 @@ class WhatsAppSession {
   async runWorker() {
     if (this.bulkState.workerAlive) return;
     this.bulkState.workerAlive = true;
-    this.pushLog('info', `Pro Cyber Engine Active — Interval: ${this.bulkState.delayMs / 1000}s`);
-
+    this.pushLog('info', `Pro Engine Active — Interval: ${this.bulkState.delayMs / 1000}s`);
     try {
       while (!this.bulkState.stopFlag) {
         this.bulkState.lastBeat = Date.now();
-
-        if (!this.isSocketReady()) {
-          await new Promise((r) => setTimeout(r, 2000));
-          continue;
+        if (!this.isSocketReady() || !this.bulkState.messages.length || !this.bulkState.targets.length) {
+          await new Promise((r) => setTimeout(r, 2000)); continue;
         }
-
-        if (!this.bulkState.messages.length || !this.bulkState.targets.length) {
-          await new Promise((r) => setTimeout(r, 1000));
-          continue;
-        }
-
         for (let mi = 0; mi < this.bulkState.messages.length && !this.bulkState.stopFlag; mi++) {
           const msg = this.bulkState.messages[mi];
-          this.bulkState.msgIndex = mi;
-          this.bulkState.currentMessage = msg;
-
+          this.bulkState.msgIndex = mi; this.bulkState.currentMessage = msg;
           for (let ti = 0; ti < this.bulkState.targets.length && !this.bulkState.stopFlag; ti++) {
             const t = this.bulkState.targets[ti];
-            this.bulkState.targetIndex = ti;
-            this.bulkState.currentTarget = t.label;
+            this.bulkState.targetIndex = ti; this.bulkState.currentTarget = t.label;
             this.bulkState.lastBeat = Date.now();
-
             if (!this.isSocketReady()) {
-              this.pushLog('warn', 'Socket link unstable — auto-healing connection...');
-              while (!this.isSocketReady() && !this.bulkState.stopFlag) {
-                await new Promise((r) => setTimeout(r, 2000));
-              }
+              this.pushLog('warn', 'Socket unstable — auto-healing...');
+              while (!this.isSocketReady() && !this.bulkState.stopFlag) await new Promise((r) => setTimeout(r, 2000));
             }
-
             if (this.bulkState.stopFlag) break;
-
             const startTime = Date.now();
-
             try {
               const res = await this.safeSend(t.jid, msg);
-              if (res.ok) {
-                this.bulkState.sent++;
-                this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → Target: ${t.label}`);
-              } else {
-                this.bulkState.failed++;
-                this.pushLog('err', `Msg ${mi + 1} → Target: ${t.label} Failed: ${res.error}`);
-              }
-            } catch (e) {
-              this.bulkState.failed++;
-              this.pushLog('err', `Dispatch Exception → Target: ${t.label}: ${e.message}`);
-            }
-
+              if (res.ok) { this.bulkState.sent++; this.pushLog('ok', `Cycle ${this.bulkState.cycle + 1} | Msg ${mi + 1}/${this.bulkState.messages.length} → ${t.label}`); }
+              else { this.bulkState.failed++; this.pushLog('err', `Msg ${mi + 1} → ${t.label} Failed: ${res.error}`); }
+            } catch (e) { this.bulkState.failed++; this.pushLog('err', `Exception → ${t.label}: ${e.message}`); }
             this.bulkState.remaining = this.bulkState.messages.length - (mi + 1);
-
             if (!this.bulkState.stopFlag) {
               const elapsed = Date.now() - startTime;
-              const remainingWait = Math.max(100, this.bulkState.delayMs - elapsed);
-              await new Promise((r) => setTimeout(r, remainingWait));
+              await new Promise((r) => setTimeout(r, Math.max(100, this.bulkState.delayMs - elapsed)));
             }
           }
-          if (this.bulkState.stopFlag) break;
         }
-
         if (!this.bulkState.stopFlag) {
-          this.bulkState.cycle++;
-          this.bulkState.remaining = this.bulkState.messages.length;
-          this.bulkState.msgIndex = 0;
-          this.bulkState.targetIndex = 0;
-          this.pushLog('info', `Cycle ${this.bulkState.cycle} finished. Seamless loop continuing...`);
+          this.bulkState.cycle++; this.bulkState.remaining = this.bulkState.messages.length;
+          this.bulkState.msgIndex = 0; this.bulkState.targetIndex = 0;
+          this.pushLog('info', `Cycle ${this.bulkState.cycle} finished...`);
         }
       }
-    } catch (loopErr) {
-      this.pushLog('err', 'Worker safeguard caught exception: ' + loopErr.message);
-    } finally {
-      this.bulkState.workerAlive = false;
-      this.bulkState.running = false;
-      this.bulkState.stopFlag = false;
-      this.bulkState.currentMessage = '';
-      this.bulkState.currentTarget = '';
-      this.pushLog('warn', `Worker session safely halted. Total Sent: ${this.bulkState.sent}`);
+    } catch (loopErr) { this.pushLog('err', 'Worker exception: ' + loopErr.message); }
+    finally {
+      this.bulkState.workerAlive = false; this.bulkState.running = false; this.bulkState.stopFlag = false;
+      this.pushLog('warn', `Worker halted. Total Sent: ${this.bulkState.sent}`);
     }
   }
 
   async connect(phone, forceNewCode = false) {
-    if (!phone) throw new Error('Phone number is required');
-    if (this.isConnecting) throw new Error('Connection handshake already active');
-    if (this.isPaired) throw new Error('Session is already active & paired');
+    if (!phone) throw new Error('Phone number required');
+    if (this.isConnecting) throw new Error('Connection already in progress');
+    if (this.isPaired) throw new Error('Session already active');
 
     if (forceNewCode) {
-      this.pairingCode = null;
-      this.pairingRequested = false;
-      this.pairingCodeGeneratedAt = 0;
+      this.pairingCode = null; this.pairingRequested = false; this.pairingCodeGeneratedAt = 0;
     }
-
-    this.isConnecting = true;
-    this.currentPhone = phone;
-    this.lastError = null;
+    this.isConnecting = true; this.currentPhone = phone; this.lastError = null;
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
@@ -233,13 +165,10 @@ class WhatsAppSession {
 
       this.sock = makeWASocket({
         version,
-        auth: {
-          creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
-        },
+        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.ubuntu('Chrome'), // Canonical browser label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -248,41 +177,27 @@ class WhatsAppSession {
       });
 
       this.sock.ev.on('creds.update', saveCreds);
-
+      
       this.sock.ev.on('groups.upsert', (groups) => {
-        groups.forEach((g) => {
-          this.groupsCache[g.id] = {
-            id: g.id,
-            name: g.subject || '',
-            size: g.participants ? g.participants.length : 0,
-          };
-        });
-      });
-
-      this.sock.ev.on('groups.update', (updates) => {
-        updates.forEach((u) => {
-          if (this.groupsCache[u.id]) {
-            if (u.subject) this.groupsCache[u.id].name = u.subject;
-          } else if (u.id) {
-            this.groupsCache[u.id] = { id: u.id, name: u.subject || '', size: 0 };
-          }
-        });
+        groups.forEach((g) => { this.groupsCache[g.id] = { id: g.id, name: g.subject || '', size: g.participants?.length || 0 }; });
       });
 
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // 🔒 STRICT LOCK: Code only generates ONCE per 60 seconds
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
+          this.pairingCodeGeneratedAt = Date.now(); // Lock timer starts
+          
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pairingCodeGeneratedAt = Date.now();
-            this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
+            this.pushLog('info', `Pairing Code: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
-            this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
+            this.pushLog('err', 'Pairing Failed: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
             this.pairingRequested = false;
@@ -291,80 +206,51 @@ class WhatsAppSession {
         }
 
         if (connection === 'open') {
-          this.isPaired = true;
-          this.pairingCode = null;
-          this.pairingRequested = false;
-          this.isConnecting = false;
-          this.connectedAt = new Date().toISOString();
-          this.lastError = null;
+          this.isPaired = true; this.pairingCode = null; this.pairingRequested = false;
+          this.isConnecting = false; this.connectedAt = new Date().toISOString();
           this.pushLog('ok', `WhatsApp Linked Successfully (${phone})`);
-
-          setTimeout(() => {
-            try {
-              const groups = this.getGroupsFromStore();
-              groups.forEach((g) => { this.groupsCache[g.id] = g; });
-            } catch (e) {}
-          }, 3000);
-
-          if (this.bulkState.running && !this.bulkState.workerAlive) {
-            this.runWorker();
-          }
+          if (this.bulkState.running && !this.bulkState.workerAlive) this.runWorker();
         }
 
         if (connection === 'close') {
           const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
+          this.pushLog('warn', `Connection closed (Code: ${statusCode})`);
           
-          if (statusCode === 515) {
-            this.pushLog('warn', 'Restart Required (515) — reconnecting without new code...');
-            this.isPaired = false;
-            this.isConnecting = false;
-            this.pairingRequested = false;
-            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
-            return;
+          this.isPaired = false; this.isConnecting = false;
+          
+          // 🛠️ FIX: If it's a restart required (515) after pairing, do not clear code
+          if (statusCode === DisconnectReason.restartRequired) {
+             this.pushLog('info', 'Restart required for pairing completion...');
+             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
+             return;
+          }
+
+          // 🛠️ FIX: Do not delete code immediately on network drop. Let the 60s timer expire.
+          const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
+          if (codeExpired || statusCode === DisconnectReason.loggedOut) {
+            this.pairingCode = null; this.pairingRequested = false; this.pairingCodeGeneratedAt = 0;
           }
 
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
-          this.pushLog('warn', `Connection stream closed (Code: ${statusCode})`);
-
-          this.isPaired = false;
-          this.isConnecting = false;
-
-          const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
-          if (codeExpired || statusCode === DisconnectReason.loggedOut) {
-            this.pairingCode = null;
-            this.pairingRequested = false;
-            this.pairingCodeGeneratedAt = 0;
-          }
-
           if (shouldReconnect && this.currentPhone) {
             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
-            this.currentPhone = null;
-            this.bulkState.stopFlag = true;
+            this.currentPhone = null; this.bulkState.stopFlag = true;
           }
         }
       });
     } catch (err) {
-      this.isConnecting = false;
-      this.lastError = err.message;
-      throw err;
+      this.isConnecting = false; this.lastError = err.message; throw err;
     }
   }
 
   async logout() {
-    this.bulkState.stopFlag = true;
-    this.bulkState.running = false;
+    this.bulkState.stopFlag = true; this.bulkState.running = false;
     if (this.sock) { try { await this.sock.logout(); } catch (_) {} }
     if (fs.existsSync(this.authDir)) fs.rmSync(this.authDir, { recursive: true, force: true });
-    this.isPaired = false;
-    this.pairingCode = null;
-    this.currentPhone = null;
-    this.pairingRequested = false;
-    this.isConnecting = false;
-    this.connectedAt = null;
-    this.lastError = null;
-    this.sock = null;
-    this.groupsCache = {};
+    this.isPaired = false; this.pairingCode = null; this.currentPhone = null;
+    this.pairingRequested = false; this.isConnecting = false;
+    this.connectedAt = null; this.lastError = null; this.sock = null; this.groupsCache = {};
     this.pushLog('warn', 'Session wiped and logged out');
   }
 }
@@ -373,30 +259,23 @@ setInterval(() => {
   Object.values(sessions).forEach((sess) => {
     if (sess.bulkState.running && (!sess.bulkState.workerAlive || Date.now() - sess.bulkState.lastBeat > 20000)) {
       sess.pushLog('warn', 'Watchdog: Reviving frozen background worker...');
-      sess.bulkState.workerAlive = false;
-      sess.runWorker();
+      sess.bulkState.workerAlive = false; sess.runWorker();
     }
   });
 }, WATCHDOG_INTERVAL_MS);
 
 function getOrCreateSession(name) {
   const cleanName = (name || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  if (!sessions[cleanName]) {
-    sessions[cleanName] = new WhatsAppSession(cleanName);
-  }
+  if (!sessions[cleanName]) sessions[cleanName] = new WhatsAppSession(cleanName);
   return sessions[cleanName];
 }
 
 if (fs.existsSync(SESSIONS_BASE_DIR)) {
   fs.readdirSync(SESSIONS_BASE_DIR, { withFileTypes: true }).forEach((dirent) => {
-    if (dirent.isDirectory()) {
-      getOrCreateSession(dirent.name);
-    }
+    if (dirent.isDirectory()) getOrCreateSession(dirent.name);
   });
 }
-if (Object.keys(sessions).length === 0) {
-  getOrCreateSession('default');
-}
+if (Object.keys(sessions).length === 0) getOrCreateSession('default');
 
 const DASHBOARD_HTML = `<!DOCTYPE html>
 <html lang="en">
@@ -523,6 +402,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="matrix-grid"></div>
 <div class="orb-field"><div class="neon-glow"></div><div class="neon-glow"></div></div>
 
+<!-- 🚀 PRO SPLASH TOAST 🚀 -->
 <div id="splash-toast">
   RK RAJA XWD
   <span class="sub">Server Start Ho Gya</span>
@@ -748,10 +628,11 @@ function log(type,msg){
   while(box.children.length>500) box.removeChild(box.firstChild);
 }
 
+// 🚀 SPLASH TOAST LOGIC
 function showSplash() {
   const toast = document.getElementById('splash-toast');
   toast.classList.add('show');
-  setTimeout(() => { toast.classList.remove('show'); }, 1000);
+  setTimeout(() => { toast.classList.remove('show'); }, 1000); // 1 second me gayab
 }
 
 async function loadSessions(){
@@ -1026,7 +907,7 @@ async function startServer(){
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','24/7 loop active — Total messages: '+d.total);
     stopBtn.disabled=false;
-    showSplash();
+    showSplash(); // 🚀 TOAST TRIGGERED HERE
   }catch(e){
     log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
