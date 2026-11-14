@@ -1,10 +1,11 @@
-const makeWASocket = require('baileys').default;
+const makeWASocket = require('@whiskeysockets/baileys').default; // 👈 Sahi package name
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion,
-  makeCacheableSignalKeyStore
-} = require('baileys');
+  fetchLatestWaWebVersion, // 👈 Latest version fetch
+  makeCacheableSignalKeyStore,
+  Browsers
+} = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
@@ -233,7 +234,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: ['Ubuntu', 'Chrome', ''],
+        browser: Browsers.ubuntu('Chrome'), // 👈 Standard browser label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -266,6 +267,7 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
+        // ✅ Pairing code sirf ek baar generate hoga jab socket ready ho
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
@@ -311,11 +313,7 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
-
-          if (this.pairingCode) {
-            this.pairingRequested = false;
-            this.pairingCode = null;
-          }
+          this.pairingRequested = false;
 
           if (shouldReconnect && this.currentPhone) {
             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
