@@ -152,14 +152,11 @@ class WhatsAppSession {
 
   async connect(phone) {
     if (!phone) throw new Error('Phone number required');
-    if (this.isConnecting) throw new Error('Connection already in progress');
-    if (this.isPaired) throw new Error('Session already active');
+    if (this.isConnecting && !this.pairingCode) throw new Error('Connection already in progress');
 
     this.isConnecting = true; 
     this.currentPhone = phone; 
     this.lastError = null;
-    this.pairingCode = null;
-    this.pairingRequested = false;
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
@@ -210,7 +207,7 @@ class WhatsAppSession {
               this.pairingRequested = false;
               this.isConnecting = false;
             }
-          }, 2000);
+          }, 1500);
         }
 
         if (connection === 'open') {
@@ -1125,7 +1122,7 @@ app.post('/api/pair', async (req, res) => {
 
     const sess = getOrCreateSession(cleanName);
     
-    // Non-blocking connection trigger
+    // Async background connection start to prevent blocking HTTP response
     sess.connect(cleanPhone).catch((e) => {
       sess.lastError = e.message;
     });
@@ -1353,6 +1350,7 @@ app.post('/api/bulk/stop', (req, res) => {
   if (!sess.bulkState.running) {
     return res.status(400).json({ success: false, error: 'No active task running on this session.' });
   }
+  sess.bulkState.stopGrade = true; // safe fallback
   sess.bulkState.stopFlag = true;
   sess.bulkState.running = false;
   sess.pushLog('warn', 'Emergency stop executed securely by session owner');
