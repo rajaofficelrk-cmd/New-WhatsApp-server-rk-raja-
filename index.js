@@ -1,8 +1,8 @@
-const makeWASocket = require('@whiskeysockets/baileys').default; // 👈 Sahi package name
+const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // 👈 Latest version fetch
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore,
   Browsers
 } = require('@whiskeysockets/baileys');
@@ -44,6 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
+    this.pairingCodeGeneratedAt = 0; // 🕒 Naya: Code generate hone ka time track karne ke liye
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -211,15 +212,20 @@ class WhatsAppSession {
     }
   }
 
-  async connect(phone) {
+  async connect(phone, forceNewCode = false) {
     if (!phone) throw new Error('Phone number is required');
     if (this.isConnecting) throw new Error('Connection handshake already active');
     if (this.isPaired) throw new Error('Session is already active & paired');
 
+    // 🛠️ FIX: Agar user ne naya code manga hai tabhi reset karo, warna purana code wahi rakho
+    if (forceNewCode) {
+      this.pairingCode = null;
+      this.pairingRequested = false;
+      this.pairingCodeGeneratedAt = 0;
+    }
+
     this.isConnecting = true;
     this.currentPhone = phone;
-    this.pairingCode = null;
-    this.pairingRequested = false;
     this.lastError = null;
 
     try {
@@ -234,7 +240,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'), // 👈 Standard browser label
+        browser: Browsers.ubuntu('Chrome'), // Standard signature
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -267,13 +273,14 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ✅ Pairing code sirf ek baar generate hoga jab socket ready ho
+        // 🛠️ FIX: Pairing code sirf ek baar generate hoga aur 60 second tak valid rahega
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+            this.pairingCodeGeneratedAt = Date.now(); // Time save karo
             this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
@@ -313,13 +320,20 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
-          this.pairingRequested = false;
 
-          if (shouldReconnect && this.currentPhone) {
-            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
-          } else if (statusCode === DisconnectReason.loggedOut) {
+          // 🛠️ FIX: Connection drop hone par turant code mat delete karo. 
+          // Agar code 60 second se purana ho gaya hai tabhi delete karo.
+          const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
+          if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
             this.pairingRequested = false;
+            this.pairingCodeGeneratedAt = 0;
+          }
+
+          if (shouldReconnect && this.currentPhone) {
+            // Reconnect karte time forceNewCode = false bhejo taaki code change na ho
+            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
+          } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null;
             this.bulkState.stopFlag = true;
           }
@@ -1168,7 +1182,8 @@ app.post('/api/pair', async (req, res) => {
       } catch (e) {}
     }
 
-    sess.connect(phone).catch((e) => {
+    // 🛠️ FIX: Jab user manually click kare tabhi forceNewCode=true bhejo
+    sess.connect(phone, true).catch((e) => {
       sess.lastError = e.message;
     });
 
