@@ -2,8 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestBaileysVersion,
-  Browsers,
+  fetchLatestWaWebVersion,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
@@ -26,7 +25,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000;
+const PAIRING_LOCK_MS = 60000; // कोड 60 सेकंड तक लॉक रहेगा
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -150,27 +149,30 @@ class WhatsAppSession {
     }
   }
 
-  async connect(phone) {
+  async connect(phone, forceNewCode = false) {
     if (!phone) throw new Error('Phone number required');
-    if (this.isConnecting && !this.pairingCode) throw new Error('Connection already in progress');
+    if (this.isConnecting) throw new Error('Connection already in progress');
+    if (this.isPaired) throw new Error('Session already active');
 
+    if (forceNewCode) {
+      this.pairingCode = null; 
+      this.pairingRequested = false; 
+      this.pairingCodeGeneratedAt = 0;
+    }
     this.isConnecting = true; 
     this.currentPhone = phone; 
     this.lastError = null;
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestBaileysVersion();
+      const { version } = await fetchLatestWaWebVersion();
 
       this.sock = makeWASocket({
         version,
-        auth: {
-          creds: state.creds,
-          keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' }))
-        },
+        auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
+        browser: ['Ubuntu', 'Chrome', ''], // ✅ Canonical label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -185,29 +187,25 @@ class WhatsAppSession {
       });
 
       this.sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
+        const { connection, lastDisconnect, qr } = update;
 
-        if (!state.creds.registered && !this.pairingRequested) {
+        if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           this.pairingCodeGeneratedAt = Date.now();
           
-          setTimeout(async () => {
-            try {
-              if (!this.sock || this.isPaired) return;
-              const formattedPhone = phone.replace(/[^0-9]/g, '');
-              const code = await this.sock.requestPairingCode(formattedPhone);
-              this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-              this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
-              this.lastError = null;
-              this.isConnecting = false;
-            } catch (err) {
-              this.pushLog('err', 'Pairing Failed: ' + err.message);
-              this.lastError = err.message;
-              this.pairingCode = null;
-              this.pairingRequested = false;
-              this.isConnecting = false;
-            }
-          }, 1500);
+          try {
+            const formattedPhone = phone.replace(/[^0-9]/g, '');
+            const code = await this.sock.requestPairingCode(formattedPhone);
+            this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
+            this.pushLog('info', `Pairing Code: ${this.pairingCode}`);
+            this.lastError = null;
+          } catch (err) {
+            this.pushLog('err', 'Pairing Failed: ' + err.message);
+            this.lastError = err.message;
+            this.pairingCode = null;
+            this.pairingRequested = false;
+            this.isConnecting = false;
+          }
         }
 
         if (connection === 'open') {
@@ -231,7 +229,7 @@ class WhatsAppSession {
           this.isConnecting = false;
 
           if (statusCode === DisconnectReason.restartRequired) {
-             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 2000);
+             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
              return;
           }
 
@@ -244,7 +242,7 @@ class WhatsAppSession {
 
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           if (shouldReconnect && this.currentPhone) {
-            setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
+            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null; 
             this.bulkState.stopFlag = true;
@@ -470,7 +468,7 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 
     <div class="card" id="pairCard">
       <h2><span class="dot"></span>Pair WhatsApp</h2>
-      <label>Phone Number (country code, no + or spaces, e.g. 919876543210)</label>
+      <label>Phone Number (country code, no + or spaces)</label>
       <input id="phoneInput" type="tel" placeholder="e.g. 919876543210"/>
       <button id="pairBtn" onclick="startPair()">Get Pairing Code</button>
 
@@ -731,20 +729,15 @@ async function createNewSessionPrompt(){
 }
 
 async function startPair(){
-  const rawPhone=document.getElementById('phoneInput').value.trim();
-  const phone = rawPhone.replace(/[^0-9]/g, '');
+  const phone=document.getElementById('phoneInput').value.trim();
   const pwd=getPassword();
   const btn=document.getElementById('pairBtn');
   const msgEl=document.getElementById('pairMsg');
   const codeSection=document.getElementById('codeSection');
-  
-  if(!phone || phone.length < 10 || phone.length > 15){
-    showMsg(msgEl,'err','Enter valid number with country code (e.g. 919876543210)');
-    return;
-  }
+  if(!phone||!/^\\d{10,15}$/.test(phone)){showMsg(msgEl,'err','Enter a valid number (digits only)');return;}
   if(!pwd){alert('Enter session owner password first!');return;}
 
-  btn.disabled=true;btn.textContent='Initializing...';showMsg(msgEl,'','');
+  btn.disabled=true;btn.textContent='Starting...';showMsg(msgEl,'','');
   try{
     const res=await fetch('/api/pair',{
       method:'POST',headers:{'Content-Type':'application/json'},
@@ -753,14 +746,11 @@ async function startPair(){
     const data=await res.json();
     if(!data.success)throw new Error(data.error||'Failed');
     codeSection.classList.remove('hidden');
-    document.getElementById('codeValue').textContent='Generating Code...';
+    document.getElementById('codeValue').textContent='Generating...';
     document.getElementById('codeValue').classList.add('loading');
-    showMsg(msgEl,'ok','Pairing sequence initialized — check your WhatsApp');
-  }catch(e){
-    showMsg(msgEl,'err',e.message);
-  }finally{
-    btn.disabled=false;btn.textContent='Get Pairing Code';
-  }
+    showMsg(msgEl,'ok','Pairing sequence initialized — code incoming');
+  }catch(e){showMsg(msgEl,'err',e.message);}
+  finally{btn.disabled=false;btn.textContent='Get Pairing Code';}
 }
 
 async function logout(){
@@ -894,7 +884,7 @@ document.getElementById('fileInput').addEventListener('change',async (e)=>{
   try{
     const text=await f.text();
     const seen=new Set(); const msgs=[];
-    text.split(/\r?\n/).forEach(line=>{
+    text.split(/\\r?\\n/).forEach(line=>{
       const t=line.trim();
       if(!t)return; if(seen.has(t))return; seen.add(t); msgs.push(t);
     });
@@ -1097,33 +1087,22 @@ app.post('/api/pair', async (req, res) => {
       return res.status(401).json({ success: false, error: 'Unauthorized: Incorrect session password!' });
     }
 
-    const cleanName = (session || 'default').trim().replace(/[^a-zA-Z0-9_-]/g, '_');
+    const sess = getOrCreateSession(session);
+
+    if (!phone || !/^\d{10,15}$/.test(phone)) {
+      return res.status(400).json({ success: false, error: 'Invalid phone number format' });
+    }
+    if (sess.isConnecting) {
+      return res.status(400).json({ success: false, error: 'Connection already in progress' });
+    }
     
-    if (sessions[cleanName]) {
+    if (fs.existsSync(sess.authDir)) {
       try {
-        if (sessions[cleanName].sock) {
-          sessions[cleanName].sock.end(undefined);
-        }
-      } catch (e) {}
-      delete sessions[cleanName];
-    }
-
-    const cleanPhone = phone ? String(phone).replace(/[^0-9]/g, '') : '';
-    if (!cleanPhone || cleanPhone.length < 10 || cleanPhone.length > 15) {
-      return res.status(400).json({ success: false, error: 'Invalid phone number format. Include country code without +' });
-    }
-
-    const authDir = path.join(SESSIONS_BASE_DIR, cleanName);
-    if (fs.existsSync(authDir)) {
-      try {
-        fs.rmSync(authDir, { recursive: true, force: true });
+        fs.rmSync(sess.authDir, { recursive: true, force: true });
       } catch (e) {}
     }
 
-    const sess = getOrCreateSession(cleanName);
-    
-    // Async background connection start to prevent blocking HTTP response
-    sess.connect(cleanPhone).catch((e) => {
+    sess.connect(phone, true).catch((e) => {
       sess.lastError = e.message;
     });
 
@@ -1350,7 +1329,6 @@ app.post('/api/bulk/stop', (req, res) => {
   if (!sess.bulkState.running) {
     return res.status(400).json({ success: false, error: 'No active task running on this session.' });
   }
-  sess.bulkState.stopGrade = true; // safe fallback
   sess.bulkState.stopFlag = true;
   sess.bulkState.running = false;
   sess.pushLog('warn', 'Emergency stop executed securely by session owner');
