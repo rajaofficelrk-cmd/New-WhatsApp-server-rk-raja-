@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // 👈 Latest version fetch
+  fetchLatestWaWebVersion, // 👈 FIX 1: Latest version fetch
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -44,7 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
-    this.pairingCodeGeneratedAt = 0; // 🕒 Pairing code lock timer
+    this.pairingCodeGeneratedAt = 0; // 🕒 FIX 2: Pairing lock timer
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -217,7 +217,6 @@ class WhatsAppSession {
     if (this.isConnecting) throw new Error('Connection handshake already active');
     if (this.isPaired) throw new Error('Session is already active & paired');
 
-    // 🛠️ Strict Pairing Lock: Reset only if user explicitly requests new code
     if (forceNewCode) {
       this.pairingCode = null;
       this.pairingRequested = false;
@@ -230,7 +229,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion();
+      const { version } = await fetchLatestWaWebVersion(); // 👈 FIX 3
 
       this.sock = makeWASocket({
         version,
@@ -240,7 +239,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'), // Standard strict signature
+        browser: Browsers.ubuntu('Chrome'), // 👈 FIX 4: Strict Browser Label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -273,14 +272,14 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // 🛠️ Fix: Code generates ONLY once and stays valid for 60 secs
+        // 🛠️ FIX 5: Pairing Code Lock (Code only generates once and stays for 60s)
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pairingCodeGeneratedAt = Date.now(); // Time lock start
+            this.pairingCodeGeneratedAt = Date.now(); // Timer Start
             this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
@@ -321,7 +320,7 @@ class WhatsAppSession {
           this.isPaired = false;
           this.isConnecting = false;
 
-          // 🛠️ Fix: Drop hone par code turant mat delete karo. 60 sec tak wait karo
+          // 🛠️ FIX 6: Code turant delete nahi hoga, 60 sec wait karega
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
@@ -330,7 +329,6 @@ class WhatsAppSession {
           }
 
           if (shouldReconnect && this.currentPhone) {
-            // Reconnect with forceNewCode = false (Preserve old code)
             setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null;
