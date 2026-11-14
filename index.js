@@ -1,11 +1,10 @@
-const makeWASocket = require('@whiskeysockets/baileys').default;
+const makeWASocket = require('baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
   fetchLatestWaWebVersion,
-  Browsers,
   makeCacheableSignalKeyStore
-} = require('@whiskeysockets/baileys');
+} = require('baileys');
 const { Boom } = require('@hapi/boom');
 const express = require('express');
 const pino = require('pino');
@@ -234,7 +233,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: ['Ubuntu', 'Chrome', ''],
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -267,9 +266,8 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // 🔒 锁定逻辑：仅当 socket 准备就绪且未请求过时，才请求一次配对码
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
-          this.pairingRequested = true; 
+          this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
@@ -280,7 +278,7 @@ class WhatsAppSession {
             this.pushLog('err', 'Pairing Handshake Failed: ' + err.message);
             this.lastError = err.message;
             this.pairingCode = null;
-            this.pairingRequested = false; 
+            this.pairingRequested = false;
             this.isConnecting = false;
           }
         }
@@ -313,8 +311,7 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
-          
-          // 若因配对码过期或异常断开，重置状态以便重连时可以重新申请
+
           if (this.pairingCode) {
             this.pairingRequested = false;
             this.pairingCode = null;
