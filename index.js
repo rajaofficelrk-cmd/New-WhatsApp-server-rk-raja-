@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion,
+  fetchLatestWaWebVersion, // ✅ Latest WA Web version fix
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -26,7 +26,7 @@ const DEFAULT_DELAY_SECONDS = 10;
 const SEND_RETRY = 2;
 const RETRY_WAIT_MS = 2000;
 const WATCHDOG_INTERVAL_MS = 10000;
-const PAIRING_LOCK_MS = 60000; // कोड 60 सेकंड तक लॉक रहेगा
+const PAIRING_LOCK_MS = 60000;
 
 const sessions = {};
 let serverStartTime = Date.now();
@@ -155,7 +155,6 @@ class WhatsAppSession {
     if (this.isConnecting) throw new Error('Connection already in progress');
     if (this.isPaired) throw new Error('Session already active');
 
-    // 🔒 STRICT LOCK: Code only resets if forceNewCode is true (User clicked button)
     if (forceNewCode) {
       this.pairingCode = null; 
       this.pairingRequested = false; 
@@ -174,7 +173,7 @@ class WhatsAppSession {
         auth: { creds: state.creds, keys: makeCacheableSignalKeyStore(state.keys, pino({ level: 'silent' })) },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'), // ✅ Standard Label
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -191,7 +190,6 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ✅ FIX: Request pairing code ONLY when socket is ready and not already requested
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           this.pairingCodeGeneratedAt = Date.now();
@@ -231,13 +229,11 @@ class WhatsAppSession {
           this.isPaired = false; 
           this.isConnecting = false;
 
-          // If it's restartRequired (515), just reconnect without wiping the code
           if (statusCode === DisconnectReason.restartRequired) {
              setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 2000);
              return;
           }
 
-          // Preserve code for 60 seconds on network drop
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > PAIRING_LOCK_MS);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null; 
@@ -247,7 +243,7 @@ class WhatsAppSession {
 
           const shouldReconnect = statusCode !== DisconnectReason.loggedOut;
           if (shouldReconnect && this.currentPhone) {
-            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000); // ❌ forceNewCode = false
+            setTimeout(() => this.connect(this.currentPhone, false).catch(() => {}), 3000);
           } else if (statusCode === DisconnectReason.loggedOut) {
             this.currentPhone = null; 
             this.bulkState.stopFlag = true;
@@ -427,7 +423,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="matrix-grid"></div>
 <div class="orb-field"><div class="neon-glow"></div><div class="neon-glow"></div></div>
 
-<!-- 🚀 PRO SPLASH TOAST 🚀 -->
 <div id="splash-toast">
   RK RAJA XWD
   <span class="sub">Server Start Ho Gya</span>
@@ -653,11 +648,10 @@ function log(type,msg){
   while(box.children.length>500) box.removeChild(box.firstChild);
 }
 
-// 🚀 SPLASH TOAST LOGIC
 function showSplash() {
   const toast = document.getElementById('splash-toast');
   toast.classList.add('show');
-  setTimeout(() => { toast.classList.remove('show'); }, 1000); // 1 second me gayab
+  setTimeout(() => { toast.classList.remove('show'); }, 1000);
 }
 
 async function loadSessions(){
@@ -932,7 +926,7 @@ async function startServer(){
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','24/7 loop active — Total messages: '+d.total);
     stopBtn.disabled=false;
-    showSplash(); // 🚀 TOAST TRIGGERED HERE
+    showSplash();
   }catch(e){
     log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
