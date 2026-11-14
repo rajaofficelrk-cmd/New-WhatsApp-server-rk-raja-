@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // 👈 FIX 1: Latest version fetch
+  fetchLatestWaWebVersion,
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -44,7 +44,7 @@ class WhatsAppSession {
     this.authDir = path.join(SESSIONS_BASE_DIR, name);
     this.sock = null;
     this.pairingCode = null;
-    this.pairingCodeGeneratedAt = 0; // 🕒 FIX 2: Pairing lock timer
+    this.pairingCodeGeneratedAt = 0; // 🕒 Pairing lock timer
     this.isPaired = false;
     this.currentPhone = null;
     this.pairingRequested = false;
@@ -229,7 +229,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion(); // 👈 FIX 3
+      const { version } = await fetchLatestWaWebVersion();
 
       this.sock = makeWASocket({
         version,
@@ -239,7 +239,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'), // 👈 FIX 4: Strict Browser Label
+        browser: Browsers.ubuntu('Chrome'),
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -272,14 +272,13 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // 🛠️ FIX 5: Pairing Code Lock (Code only generates once and stays for 60s)
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
             const formattedPhone = phone.replace(/[^0-9]/g, '');
             const code = await this.sock.requestPairingCode(formattedPhone);
             this.pairingCode = code?.match(/.{1,4}/g)?.join('-') || code;
-            this.pairingCodeGeneratedAt = Date.now(); // Timer Start
+            this.pairingCodeGeneratedAt = Date.now();
             this.pushLog('info', `Pairing Code Generated: ${this.pairingCode}`);
             this.lastError = null;
           } catch (err) {
@@ -320,7 +319,6 @@ class WhatsAppSession {
           this.isPaired = false;
           this.isConnecting = false;
 
-          // 🛠️ FIX 6: Code turant delete nahi hoga, 60 sec wait karega
           const codeExpired = this.pairingCodeGeneratedAt && (Date.now() - this.pairingCodeGeneratedAt > 60000);
           if (codeExpired || statusCode === DisconnectReason.loggedOut) {
             this.pairingCode = null;
@@ -411,8 +409,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
   .neon-glow:nth-child(1){top:10%;left:15%;width:350px;height:350px;background:#10b981;animation-delay:0s}
   .neon-glow:nth-child(2){bottom:10%;right:15%;width:420px;height:420px;background:#3b82f6;animation-delay:3s}
   @keyframes orbDrift{0%{transform:translate(0,0)}100%{transform:translate(45px,55px)}}
-  
-  /* 🚀 PRO SPLASH TOAST 🚀 */
   #splash-toast { position: fixed; top: -100px; left: 50%; transform: translateX(-50%); background: linear-gradient(90deg, #10b981, #047857); color: #fff; padding: 16px 40px; border-radius: 14px; font-weight: 900; font-size: 20px; letter-spacing: 2px; box-shadow: 0 0 40px #10b981, inset 0 0 10px rgba(255,255,255,0.5); transition: top 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); z-index: 9999; font-family: 'Orbitron', sans-serif; text-transform: uppercase; text-align: center; }
   #splash-toast.show { top: 30px; }
   #splash-toast .sub { display: block; font-size: 12px; text-align: center; margin-top: 6px; color: #a7f3d0; font-family: 'Rajdhani', sans-serif; letter-spacing: 1px; }
@@ -517,7 +513,6 @@ const DASHBOARD_HTML = `<!DOCTYPE html>
 <div class="matrix-grid"></div>
 <div class="orb-field"><div class="neon-glow"></div><div class="neon-glow"></div></div>
 
-<!-- 🚀 SPLASH TOAST 🚀 -->
 <div id="splash-toast">
   RK RAJA XWD
   <span class="sub">Server Start Ho Gya</span>
@@ -743,11 +738,10 @@ function log(type,msg){
   while(box.children.length>500) box.removeChild(box.firstChild);
 }
 
-// 🚀 SPLASH TOAST LOGIC
 function showSplash() {
   const toast = document.getElementById('splash-toast');
   toast.classList.add('show');
-  setTimeout(() => { toast.classList.remove('show'); }, 1000); // 1 second me gayab
+  setTimeout(() => { toast.classList.remove('show'); }, 1000);
 }
 
 async function loadSessions(){
@@ -1022,7 +1016,7 @@ async function startServer(){
     if(!d.success)throw new Error(d.error||'Failed');
     log('ok','24/7 loop active — Total messages: '+d.total);
     stopBtn.disabled=false;
-    showSplash(); // 🚀 TOAST TRIGGERED HERE
+    showSplash();
   }catch(e){
     log('err','Start failed: '+e.message);
     alert('Start failed: '+e.message);
