@@ -2,7 +2,7 @@ const makeWASocket = require('@whiskeysockets/baileys').default;
 const {
   useMultiFileAuthState,
   DisconnectReason,
-  fetchLatestWaWebVersion, // 👈 Yahan fix kiya (fetchLatestWaWebVersion)
+  fetchLatestWaWebVersion, // 👈 Version fetch fix
   Browsers,
   makeCacheableSignalKeyStore
 } = require('@whiskeysockets/baileys');
@@ -224,7 +224,7 @@ class WhatsAppSession {
 
     try {
       const { state, saveCreds } = await useMultiFileAuthState(this.authDir);
-      const { version } = await fetchLatestWaWebVersion(); // 👈 Fixed Version Fetch
+      const { version } = await fetchLatestWaWebVersion(); // 👈 Latest version
 
       this.sock = makeWASocket({
         version,
@@ -234,7 +234,7 @@ class WhatsAppSession {
         },
         printQRInTerminal: false,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.ubuntu('Chrome'),
+        browser: Browsers.ubuntu('Chrome'), // 👈 Strict canonical label
         syncFullHistory: false,
         markOnlineOnConnect: false,
         connectTimeoutMs: 60000,
@@ -267,7 +267,7 @@ class WhatsAppSession {
       this.sock.ev.on('connection.update', async (update) => {
         const { connection, lastDisconnect, qr } = update;
 
-        // ✅ FIX: Request Pairing Code only when socket is ready (on qr or connecting)
+        // ✅ CRITICAL FIX: Request pairing code ONLY when socket is ready (qr or connecting)
         if ((qr || connection === 'connecting') && !this.sock.authState.creds.registered && !this.pairingRequested) {
           this.pairingRequested = true;
           try {
@@ -313,7 +313,7 @@ class WhatsAppSession {
 
           this.isPaired = false;
           this.isConnecting = false;
-          this.pairingRequested = false; // Reset flag on close
+          this.pairingRequested = false; // Reset for reconnect
 
           if (shouldReconnect && this.currentPhone) {
             setTimeout(() => this.connect(this.currentPhone).catch(() => {}), 3000);
@@ -1162,7 +1162,7 @@ app.post('/api/pair', async (req, res) => {
       return res.status(400).json({ success: false, error: 'Connection already in progress' });
     }
     
-    // Remove old session data to avoid conflict
+    // Clear old session data before pairing
     if (fs.existsSync(sess.authDir)) {
       try {
         fs.rmSync(sess.authDir, { recursive: true, force: true });
